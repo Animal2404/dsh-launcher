@@ -229,3 +229,43 @@ export function listLogs(): Promise<LogFile[]> {
 export function readLog(relPath: string): Promise<string> {
   return invoke("read_log", { relPath });
 }
+
+// ═══════════════ TokenTracker（Token 统计面板）═══════════════
+
+/** TokenTracker 运行状态（对应 Rust TokentrackerStatus） */
+export type TokentrackerStatus = "stopped" | "starting" | "running" | "stopping" | "error";
+
+/** 查询 TokenTracker 运行状态 */
+export function getTokentrackerStatus(): Promise<TokentrackerStatus> {
+  return invoke("get_tokentracker_status");
+}
+
+/** 查询 TokenTracker 看板端口（0 = 未运行） */
+export function getTokentrackerPort(): Promise<number> {
+  return invoke("get_tokentracker_port");
+}
+
+/** 检测 tokentracker-cli 是否已安装 */
+export function detectTokentrackerCli(): Promise<boolean> {
+  return invoke("detect_tokentracker_cli");
+}
+
+/** 安装 tokentracker-cli（npm 全局） */
+export function installTokentrackerCli(): Promise<string> {
+  return invoke("install_tokentracker_cli");
+}
+
+/** 启动 tracker serve（返回实际端口） */
+export function startTokentracker(): Promise<number> {
+  return invoke("start_tokentracker");
+}
+
+/** 停止 tracker serve */
+export function stopTokentracker(): Promise<string> {
+  return invoke("stop_tokentracker");
+}
+
+/** 打开 TokenTracker 看板独立窗口 */
+export function openTokentrackerDashboard(): Promise<string> {
+  return invoke("open_tokentracker_dashboard");
+}

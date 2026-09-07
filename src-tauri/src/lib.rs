@@ -9,13 +9,15 @@ pub mod commands;
 
 use crate::core::logging::Logger;
 use crate::core::process::ProcessManager;
+use crate::core::tokentracker::TokentrackerManager;
 use std::sync::Arc;
 use tauri::Manager;
 
-/// 全局状态：日志 + 进程管理器
+/// 全局状态：日志 + 进程管理器 + TokenTracker 管理器
 pub struct AppState {
     pub logger: Arc<Logger>,
     pub process: Arc<ProcessManager>,
+    pub tokentracker: Arc<TokentrackerManager>,
 }
 
 /// 打开内嵌 Web GUI 窗口（桌面快捷方式 --web-gui / 自动打开 / 前端"内嵌打开"命令调用）
@@ -176,6 +178,7 @@ pub fn run() {
     let process = Arc::new(ProcessManager::new(Arc::clone(&logger)));
     // v0.4.13（审计修复 2.11）：后端 5s 状态对账（收养实例退出/外部启停收敛）
     process.spawn_reconcile();
+    let tokentracker = Arc::new(TokentrackerManager::new(Arc::clone(&logger)));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -195,6 +198,7 @@ pub fn run() {
         .manage(AppState {
             logger: Arc::clone(&logger),
             process: Arc::clone(&process),
+            tokentracker: Arc::clone(&tokentracker),
         })
         .setup({
             let process = Arc::clone(&process);
@@ -256,6 +260,24 @@ pub fn run() {
                         }
                     });
                 }
+                // TokenTracker 自动启动：延迟 2.5s 后台执行（不阻塞 setup / 主窗口首帧）。
+                // start() 内部自带收养：外部 tracker serve 已占用 7680 时直接收养为托管看板；
+                // 失败（未安装 tokentracker-cli / 端口全占等）仅落日志，不打扰用户——
+                // 面板内保留手动安装/启动按钮，前端 2s 轮询会自动发现 Running 状态。
+                {
+                    let tt = Arc::clone(&tokentracker);
+                    let logger = Arc::clone(&logger);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(2500));
+                        if let Err(e) = tt.start() {
+                            logger.log(
+                                crate::core::logging::LogSource::Launcher,
+                                crate::core::logging::LogLevel::Warn,
+                                &format!("TokenTracker 自动启动未执行: {e}"),
+                            );
+                        }
+                    });
+                }
                 // v0.3.2：桌面快捷方式（--web-gui 参数）→ 启动即打开内嵌 Web GUI 窗口
                 if std::env::args().any(|a| a == "--web-gui") {
                     open_web_gui_window(app.handle());
@@ -297,6 +319,13 @@ pub fn run() {
             commands::version::uninstall,
             commands::logs::list_logs,
             commands::logs::read_log,
+            commands::tokentracker::get_tokentracker_status,
+            commands::tokentracker::get_tokentracker_port,
+            commands::tokentracker::detect_tokentracker_cli,
+            commands::tokentracker::install_tokentracker_cli,
+            commands::tokentracker::start_tokentracker,
+            commands::tokentracker::stop_tokentracker,
+            commands::tokentracker::open_tokentracker_dashboard,
         ])
         .run(tauri::generate_context!())
         // v0.4.13（审计修复 2.9）：release 无控制台时 panic 不可见，改为

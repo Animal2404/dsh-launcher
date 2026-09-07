@@ -18,6 +18,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import StatusCard from "@/components/StatusCard";
+import TokenPanel from "@/components/TokenPanel";
 import VersionPanel from "@/components/VersionPanel";
 import LogPanel from "@/components/LogPanel";
 import WindowControls from "@/components/WindowControls";
@@ -48,7 +49,11 @@ interface AppShellProps {
   onOpenSettings: () => void;
 }
 
+/** 主内容区 Tab：版本管理 / Token 统计 */
+type MainTab = "versions" | "tokens";
+
 export default function AppShell({ version, onOpenSettings }: AppShellProps) {
+  const [mainTab, setMainTab] = useState<MainTab>("versions");
   // 面板展开/收起状态（与宽度值分离：宽度持久化于 localStorage）
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -247,10 +252,39 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
           </div>
         </header>
 
-        {/* 内容行：主区（版本管理），自动占满剩余空间 */}
+        {/* 内容行：主区（版本管理 / Token 统计 Tab），自动占满剩余空间 */}
         <div className="app-content">
           <main className="app-main">
-            <VersionPanel />
+            {/* 主区 Tab 切换条 */}
+            <div className="flex items-center gap-1 border-b px-3 pt-2" role="tablist" aria-label="主区切换">
+              <Button
+                size="sm"
+                variant={mainTab === "versions" ? "default" : "ghost"}
+                role="tab"
+                aria-selected={mainTab === "versions"}
+                onClick={() => setMainTab("versions")}
+              >
+                版本管理
+              </Button>
+              <Button
+                size="sm"
+                variant={mainTab === "tokens" ? "default" : "ghost"}
+                role="tab"
+                aria-selected={mainTab === "tokens"}
+                onClick={() => setMainTab("tokens")}
+              >
+                Token 统计
+              </Button>
+            </div>
+            <div className="min-h-0 flex-1">
+              {/* 双面板常驻挂载：Tab 切换仅显隐，避免切回时重新加载（版本列表/看板状态保留） */}
+              <div className={mainTab === "versions" ? "h-full" : "hidden"}>
+                <VersionPanel />
+              </div>
+              <div className={mainTab === "tokens" ? "h-full" : "hidden"}>
+                <TokenPanel />
+              </div>
+            </div>
           </main>
         </div>
       </div>

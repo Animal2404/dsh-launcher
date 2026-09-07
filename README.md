@@ -8,6 +8,7 @@
 - **双通道版本管理**：npm 通道（registry 装包）与 GitHub 通道（clone + pnpm 构建），最新版本置顶，安装进度实时展示
 - **工具链一键安装**：检测 Node / npm / pnpm / Git / Python，支持镜像源（npm registry / GitHub 加速 / Node 二进制）
 - **Web GUI 集成**：内嵌 Tauri 窗口打开 dsh Web UI（自动携带 token 免认证），或外部浏览器 / 桌面快捷方式
+- **Token 统计（TokenTracker 集成）**：主区"Token 统计"面板——检测/一键安装 `tokentracker-cli`（npm 全局），托管 `tracker serve` 子进程（端口冲突自动 +1，7680 起），内嵌本地看板：36 个 AI 工具（Claude Code / Codex / Cursor / Gemini / DeepSeek Harness 等）统一 token 用量与成本，数据全部留在本机
 - **系统托盘**：打开主窗口 / 启动 / 停止 / 重启 / 退出，可配置"退出时驻留 dsh"
 - **全局日志**：dsh 与启动器日志统一落盘（按天轮转 + 切割 + 保留 30 天），前端实时流式展示
 
@@ -23,6 +24,11 @@ npm run tauri dev    # 开发模式（前端 + Rust 热重载）
 npm run build        # 前端构建（tsc + vite build）
 npm run tauri build  # 打包安装包（NSIS）
 ```
+
+> ⚠️ 不用 `tauri build` 直接 `cargo build --release` 时，必须显式加
+> `--features tauri/custom-protocol`，否则 Tauri 按 dev 模式加载 `devUrl`
+> （localhost:1420）导致白屏/连接拒绝；且修改 `dist/` 后如未生效，先
+> `cargo clean -p dsh-launcher`（tauri-build 不追踪 dist 文件变化）。
 
 Rust 后端入口在 `src-tauri/src/`（`core/` 核心逻辑 + `commands/` Tauri IPC），前端在 `src/`。
 

@@ -10,5 +10,6 @@ pub mod port;
 pub mod process;
 pub mod stream;
 pub mod text;
+pub mod tokentracker;
 pub mod toolchain;
 pub mod tray;

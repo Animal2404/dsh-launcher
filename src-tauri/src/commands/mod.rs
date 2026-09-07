@@ -3,5 +3,6 @@
 pub mod config;
 pub mod dsh;
 pub mod logs;
+pub mod tokentracker;
 pub mod toolchain;
 pub mod version;
