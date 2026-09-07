@@ -19,5 +19,6 @@ pub mod profile;
 pub mod skill;
 pub mod stream;
 pub mod text;
+pub mod tokentracker;
 pub mod toolchain;
 pub mod tray;
