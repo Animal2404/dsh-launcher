@@ -6,6 +6,8 @@
 
 pub mod core;
 pub mod commands;
+/// 无 GUI CLI（`dsh-launcher plugin ...` / `dsh-launcher skill ...`）
+pub mod cli;
 
 use crate::core::logging::Logger;
 use crate::core::process::ProcessManager;
@@ -260,6 +262,40 @@ pub fn run() {
                 if std::env::args().any(|a| a == "--web-gui") {
                     open_web_gui_window(app.handle());
                 }
+                // upstream 插件自动同步（ADR-0005 D6）：延迟 20s，避免与启动/首帧竞争。
+                // 只处理 origin=upstream 的包；自研插件（in-house）永不被改动。
+                if cfg.auto_sync_plugins {
+                    let process = Arc::clone(&process);
+                    let logger = Arc::clone(&logger);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        match crate::core::plugin::sync(
+                            crate::core::dshhome::MANAGED_PROFILE,
+                            true,
+                            None,
+                            &logger,
+                            Some(&process),
+                        ) {
+                            Ok(report) => {
+                                let applied =
+                                    report.items.iter().filter(|item| item.result == "ok").count();
+                                let failed = report
+                                    .items
+                                    .iter()
+                                    .filter(|item| item.result == "failed")
+                                    .count();
+                                if applied > 0 || failed > 0 {
+                                    logger.info(&format!(
+                                        "插件自动同步完成：成功 {applied}，失败 {failed}"
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                logger.warn(&format!("插件自动同步跳过：{error}"));
+                            }
+                        }
+                    });
+                }
                 Ok(())
             }
         })
@@ -297,6 +333,15 @@ pub fn run() {
             commands::version::uninstall,
             commands::logs::list_logs,
             commands::logs::read_log,
+            commands::plugin::plugin_list,
+            commands::plugin::plugin_install,
+            commands::plugin::plugin_set_state,
+            commands::plugin::plugin_uninstall,
+            commands::plugin::plugin_sync,
+            commands::plugin::plugin_repair,
+            commands::skill::skill_status,
+            commands::skill::skill_apply,
+            commands::skill::skill_migrate,
         ])
         .run(tauri::generate_context!())
         // v0.4.13（审计修复 2.9）：release 无控制台时 panic 不可见，改为

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.6.0] - 2026-09-10
+
+### 新增
+
+- **插件管理（ADR-0005）**：按包名（ID）独立管理 `enabled / disabled / uninstalled` 生命周期。
+  - 启停写 profile `cordis.patch.yml` 的**受管区块**（`- id:` + `disabled:`），由 dsh `live` 热重载，
+    **无需重启**；装卸走官方 `dsh plugin --profile web add/remove` 通道，需要重启时自动
+    stop→apply→start。
+  - 明确状态机与非法转换拒绝（未安装/普通依赖/表达式控制的行都拒绝启停，退出码 2）。
+  - 幂等：期望态与磁盘一致时返回 `unchanged`，不落盘、不重启、不发事件。
+  - **upstream 插件自动同步**：npm 源比对 registry 最新版本，git 源 `git ls-remote` 比对并
+    钉 commit；后台启动同步（设置项 `autoSyncPlugins`，默认开）+ 面板/CLI 手动同步。
+  - **自研插件隔离**：`link:`/`file:`/相对或绝对路径/tarball 判定为 `in-house`，同步任务
+    永不改动。
+  - 启动崩溃自动归因：从 dsh stderr 命中插件则**禁用其行**（可逆），不再硬编码卸载 dshmarket。
+- **技能共享管理（ADR-0005）**：以 `~/.agents/agent` 为唯一真源，统一 `skills/`、`AGENTS.md`、
+  `CONTEXT.md`。
+  - Mode L（默认）：`~/.dsh` 下同名资源建立链接（目录用 junction 免特权，文件用符号链接）；
+  - Mode C（降级）：无文件符号链接权限时，写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块
+    （`skill-filesystem.agentsHome` / `agent-instructions.dshHome`），dsh 直接读真源；
+  - 冲突资源（真实文件/目录）**绝不自动删除**，只提供预演与显式迁移（原文件改名保留）。
+- **底部入口按钮组**：侧栏底部由单个"设置"按钮改为 `插件 | 技能 | 设置` 三按钮组（顺序固定），
+  分别打开对应 Dialog。
+- **无 GUI CLI**：`dsh-launcher plugin|skill ...`（与 GUI 共用同一 core，供脚本化验收），
+  支持 `--json` 与分级退出码。
+
+### 变更
+
+- 配置新增 `autoSyncPlugins`（滑动开关第 7 项）。
+- 新增状态文件：`%APPDATA%\dsh-launcher\plugins.json`、`skills.json`；
+  新增备份目录 `%LOCALAPPDATA%\dsh-launcher\backups\plugins\`。
+
 ## [0.5.7] - 2026-09-04
 
 ### 修复

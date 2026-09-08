@@ -40,10 +40,15 @@ src-tauri/src/
 │   ├── stream.rs         #   流式命令执行（逐行日志 + 进度回调）
 │   ├── github.rs         #   GitHub 通道：ls-remote/list、clone、pnpm 构建、全局 shim
 │   ├── toolchain.rs      #   Node 下载/解压安装（用户级）
-│   ├── events.rs         #   Tauri event 推送（安装进度/版本变更）
+│   ├── events.rs         #   Tauri event 推送（安装进度/版本变更/插件/技能）
 │   ├── logging.rs        #   dsh stdout/stderr + 启动器日志统一落盘（按天/10MB 轮转）
 │   ├── config.rs         #   启动器配置持久化（%APPDATA%\dsh-launcher\config.json）
-│   └── tray.rs           #   系统托盘 + 窗口事件（关闭/最小化行为）
+│   ├── tray.rs           #   系统托盘 + 窗口事件（关闭/最小化行为）
+│   ├── dshhome.rs        #   DSH_HOME / profiles / agents home 解析（唯一实现）
+│   ├── profile.rs        #   官方 API 适配器（唯一调用 dsh/pnpm、唯一读写 profile）
+│   ├── plugin/           #   插件管理（ADR-0005）：状态机/受管区块/dump 解析/注册表/同步
+│   └── skill.rs          #   技能共享资源（ADR-0005）：检测/链接或配置落地/迁移
+├── cli.rs                # 无 GUI CLI（plugin/skill 子命令，与 GUI 共用 core）
 ```
 
 ## 4. 核心流程
@@ -74,13 +79,29 @@ src-tauri/src/
 - 内嵌 WebView2 渲染 `http://127.0.0.1:<port>`（含 token 免认证）+ "外部浏览器打开"兜底按钮（opener 插件）。
 - 内嵌窗口任务栏图标：Rust 侧设置 SMALL + ICON_BIG（多尺寸 ICO 最大帧，防模糊）。
 - 托盘菜单：打开主窗口 / 启动 / 停止 / 重启 / 退出。
-- 滑动开关（6 项）：① 关闭直接退出（含 dsh）② 最小化到托盘 ③ 退出时驻留 dsh ④ 卸载保留 DSH_HOME（默认保留）⑤ 启动时自动启动 dsh ⑥ 启动时自动打开 Web GUI。
+- 滑动开关（7 项）：① 关闭直接退出（含 dsh）② 最小化到托盘 ③ 退出时驻留 dsh ④ 卸载保留 DSH_HOME（默认保留）⑤ 启动时自动启动 dsh ⑥ 启动时自动打开 Web GUI ⑦ 自动同步上游插件（默认开）。
+
+### 4.6 插件与技能管理（ADR-0005）
+
+- **入口**：侧栏底部按钮组 `插件 | 技能 | 设置`（顺序固定），各开一个 Dialog。
+- **插件**：按包名（ID）独立管理 `enabled/disabled/uninstalled`。
+  - 启停 = 写 profile `cordis.patch.yml` 的受管区块（`- id:` + `disabled:`）→ dsh `live` 热重载，不重启；
+  - 装卸 = `dsh plugin --profile web add/remove`（官方唯一依赖通道）→ 需要重启时自动 stop→apply→start；
+  - 幂等：期望态与磁盘一致时返回 `unchanged`，不落盘、不重启；
+  - upstream 插件后台自动同步（npm 版本 / git commit，git 一律钉 sha）；自研插件永不被同步改动。
+- **技能**：共享真源 `~/.agents/agent`；优先建立 `~/.dsh` 链接（Mode L），无文件链接权限时降级为
+  `$DSH_HOME/cordis.patch.yml` 的 shared 区块（Mode C）。冲突资源只提示与迁移，绝不自动删除。
+- **CLI**：`dsh-launcher plugin|skill ...` 与 GUI 共用同一 core，供脚本化验收。
 
 ## 5. 数据与配置
 
 - 启动器配置：`%APPDATA%\dsh-launcher\config.json`（端口、镜像源、GitHub Token、滑动开关）。
+- 受管插件注册表：`%APPDATA%\dsh-launcher\plugins.json`（来源分类/期望态/上次同步；磁盘为事实源）。
+- 技能共享偏好：`%APPDATA%\dsh-launcher\skills.json`（共享模式偏好与最近应用时间）。
+- 插件操作备份：`%LOCALAPPDATA%\dsh-launcher\backups\plugins\<pkg>\<ts>\`。
 - 日志：`%LOCALAPPDATA%\dsh-launcher\logs\`（单文件 10MB 切割，30 天保留）。
-- DSH_HOME：**只读展示、不接管**（实际位置以 dsh 为准），卸载时默认保留、可开关（`keepDshHomeOnUninstall`）。
+- DSH_HOME：**只读展示、不接管**（实际位置以 dsh 为准），卸载时默认保留、可开关（`keepDshHomeOnUninstall`）；
+  插件/技能管理只按白名单触碰 profile 的 `cordis.patch.yml` 受管区块与 `$DSH_HOME/cordis.patch.yml`。
 
 ## 6. 版本策略（ADR-0004）
 

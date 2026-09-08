@@ -36,6 +36,8 @@ pub struct ConfigView {
     pub keep_dsh_home_on_uninstall: bool,
     pub auto_start_dsh: bool,
     pub auto_open_browser: bool,
+    /// 启动后自动同步 upstream 插件
+    pub auto_sync_plugins: bool,
 }
 
 impl From<AppConfig> for ConfigView {
@@ -53,6 +55,7 @@ impl From<AppConfig> for ConfigView {
             keep_dsh_home_on_uninstall: c.keep_dsh_home_on_uninstall,
             auto_start_dsh: c.auto_start_dsh,
             auto_open_browser: c.auto_open_browser,
+            auto_sync_plugins: c.auto_sync_plugins,
         }
     }
 }
@@ -142,6 +145,7 @@ pub fn set_switches(
     keep_dsh_home_on_uninstall: bool,
     auto_start_dsh: bool,
     auto_open_browser: bool,
+    auto_sync_plugins: bool,
 ) -> Result<(), String> {
     let _guard = cfg_write_lock();
     let mut cfg = AppConfig::load();
@@ -151,9 +155,10 @@ pub fn set_switches(
     cfg.keep_dsh_home_on_uninstall = keep_dsh_home_on_uninstall;
     cfg.auto_start_dsh = auto_start_dsh;
     cfg.auto_open_browser = auto_open_browser;
+    cfg.auto_sync_plugins = auto_sync_plugins;
     cfg.save()?;
     state.logger.info(&format!(
-        "窗口与运行行为已保存（closeExits={close_exits}, minimizeToTray={minimize_to_tray}, keepDshOnExit={keep_dsh_on_exit}, keepDshHomeOnUninstall={keep_dsh_home_on_uninstall}, autoStartDsh={auto_start_dsh}, autoOpenBrowser={auto_open_browser}）"
+        "窗口与运行行为已保存（closeExits={close_exits}, minimizeToTray={minimize_to_tray}, keepDshOnExit={keep_dsh_on_exit}, keepDshHomeOnUninstall={keep_dsh_home_on_uninstall}, autoStartDsh={auto_start_dsh}, autoOpenBrowser={auto_open_browser}, autoSyncPlugins={auto_sync_plugins}）"
     ));
     Ok(())
 }

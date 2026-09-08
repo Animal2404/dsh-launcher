@@ -21,6 +21,12 @@ pub const VERSION_CHANGED_EVENT: &str = "version://changed";
 /// （解决 ToolchainPanel 安装后不实时更新的问题；安装期间另有 install://progress 进度流）
 pub const TOOLCHAIN_CHANGED_EVENT: &str = "toolchain://changed";
 
+/// 插件变更事件名：安装/启停/卸载/同步完成后广播，前端刷新插件列表
+pub const PLUGIN_CHANGED_EVENT: &str = "plugin://changed";
+
+/// 技能共享变更事件名：共享模式/迁移完成后广播
+pub const SKILL_CHANGED_EVENT: &str = "skill://changed";
+
 /// 通过 AppHandle 广播“dsh 安装版本已变更”（无 handle 时静默丢弃）
 pub fn emit_version_changed(app: &tauri::AppHandle) {
     let _ = app.emit(VERSION_CHANGED_EVENT, ());
@@ -29,6 +35,16 @@ pub fn emit_version_changed(app: &tauri::AppHandle) {
 /// 通过 AppHandle 广播“工具链已变更”（无 handle 时静默丢弃）
 pub fn emit_toolchain_changed(app: &tauri::AppHandle) {
     let _ = app.emit(TOOLCHAIN_CHANGED_EVENT, ());
+}
+
+/// 通过 AppHandle 广播“插件已变更”（无 handle 时静默丢弃）
+pub fn emit_plugin_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(PLUGIN_CHANGED_EVENT, ());
+}
+
+/// 通过 AppHandle 广播“技能共享已变更”（无 handle 时静默丢弃）
+pub fn emit_skill_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(SKILL_CHANGED_EVENT, ());
 }
 
 /// 安装阶段

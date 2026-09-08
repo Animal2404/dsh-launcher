@@ -145,6 +145,41 @@ pub fn list_releases() -> Result<Vec<String>, String> {
     Err(format!("查询 GitHub releases 失败: {hint}"))
 }
 
+/// 查询远端引用的 sha（`git ls-remote <repo> <ref>`）。
+///
+/// ADR-0005 D6 的 upstream 同步用它把 git 依赖推进到目标 commit：
+/// 复用本模块的 git 可执行解析、Token 注入与超时兜底，不新增调用路径。
+/// `reference` 为空时查询 `HEAD`。
+/// @returns 命中的 sha（无匹配返回 None）
+pub fn ls_remote_ref(repo_url: &str, reference: &str) -> Result<Option<String>, String> {
+    let reference = if reference.trim().is_empty() {
+        "HEAD"
+    } else {
+        reference.trim()
+    };
+    let mut cmd = git_command()?;
+    apply_git_auth(&mut cmd);
+    cmd.args(["ls-remote", repo_url, reference]);
+    let out = command::run_with_timeout(cmd, std::time::Duration::from_secs(90))
+        .map_err(|e| format!("git ls-remote 执行失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-remote 失败: {}",
+            crate::core::text::decode(&out.stderr).trim()
+        ));
+    }
+    let text = crate::core::text::decode(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(sha), Some(_name)) = (parts.next(), parts.next()) {
+            if sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Ok(Some(sha.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// 从 `git ls-remote --tags` 输出解析 tag 列表（去重、去 ^{} 剥离、降序）
 fn parse_tags_from_ls_remote(text: &str) -> Vec<String> {
     let mut tags: Vec<String> = text

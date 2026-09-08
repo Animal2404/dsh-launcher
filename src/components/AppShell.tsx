@@ -37,18 +37,37 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
+  Puzzle,
   Settings as SettingsIcon,
+  Sparkles,
   X,
 } from "lucide-react";
+
+/** 底部管理入口（顺序固定：插件 | 技能 | 设置，见 ADR-0005 D11） */
+export type ShellPanel = "plugins" | "skills" | "settings";
+
+/** 底部三按钮入口定义（顺序即渲染顺序） */
+const PANEL_ENTRIES: {
+  key: ShellPanel;
+  label: string;
+  title: string;
+  Icon: typeof Puzzle;
+}[] = [
+  { key: "plugins", label: "插件", title: "插件管理", Icon: Puzzle },
+  { key: "skills", label: "技能", title: "技能共享", Icon: Sparkles },
+  { key: "settings", label: "设置", title: "打开设置", Icon: SettingsIcon },
+];
 
 interface AppShellProps {
   /** 应用版本号（来自 tauri，如 "v0.3.10"） */
   version: string;
-  /** 打开设置弹出子窗口（App.tsx 管理 Dialog 状态） */
-  onOpenSettings: () => void;
+  /** 当前打开的管理面板（App.tsx 管理 Dialog 状态） */
+  activePanel: ShellPanel | null;
+  /** 打开指定管理面板 */
+  onOpenPanel: (panel: ShellPanel) => void;
 }
 
-export default function AppShell({ version, onOpenSettings }: AppShellProps) {
+export default function AppShell({ version, activePanel, onOpenPanel }: AppShellProps) {
   // 面板展开/收起状态（与宽度值分离：宽度持久化于 localStorage）
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -183,18 +202,32 @@ export default function AppShell({ version, onOpenSettings }: AppShellProps) {
             {/* 标题已移至主内容区（titlebar），侧栏不再含标题/描述 */}
             <div className="sidebar-body">
               <StatusCard />
-              {/* 底部：设置入口（分割线分隔，独立区域） */}
+              {/* 底部：管理入口按钮组（插件 | 技能 | 设置），分割线分隔 */}
               <div className="mt-auto flex flex-col pt-4">
                 <Separator className="mb-3" />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={onOpenSettings}
-                  title="打开设置"
-                  className="w-full"
+                <div
+                  role="group"
+                  aria-label="管理入口"
+                  className="flex w-full items-center gap-1"
                 >
-                  <SettingsIcon className="size-3.5" /> 设置
-                </Button>
+                  {PANEL_ENTRIES.map(({ key, label, title, Icon }) => {
+                    const active = activePanel === key;
+                    return (
+                      <Button
+                        key={key}
+                        variant={active ? "secondary" : "outline"}
+                        size="sm"
+                        onClick={() => onOpenPanel(key)}
+                        title={title}
+                        aria-pressed={active}
+                        className="flex-1 px-1"
+                      >
+                        <Icon className="size-3.5" />
+                        {label}
+                      </Button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </div>

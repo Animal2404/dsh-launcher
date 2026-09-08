@@ -33,6 +33,8 @@ pub struct AppConfig {
     pub auto_start_dsh: bool,
     /// 启动时自动打开浏览器
     pub auto_open_browser: bool,
+    /// 启动后自动同步 upstream 插件（自研插件永不受影响，见 ADR-0005 D6）
+    pub auto_sync_plugins: bool,
 }
 
 impl Default for AppConfig {
@@ -50,6 +52,7 @@ impl Default for AppConfig {
             keep_dsh_home_on_uninstall: true,
             auto_start_dsh: false,
             auto_open_browser: true,
+            auto_sync_plugins: true,
         }
     }
 }

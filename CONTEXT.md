@@ -23,6 +23,22 @@
 
 - **workspace root**：启动 dsh 时的 CWD，由 dsh 官方行为决定（默认该目录）。启动器**不配置、不干预、不校验**。
 
+## 插件（ADR-0005）
+
+- **受管 profile**：启动器唯一管理的 profile，固定为 `web`（`dsh web` 的官方别名目标）。
+- **插件（profile bundle）**：`dsh.profile.bundles` 里的一层，由 `dsh plugin` 官方通道装卸。
+- **插件状态**：`uninstalled`（依赖不存在）| `plain`（普通依赖，不声明 `dsh.bundle`，不可启停）| `enabled` | `disabled`。
+- **启停**：写 profile 的 `cordis.patch.yml` 受管区块（`- id:` + `disabled:`），由 dsh `live` 热重载，**不需要重启**。
+- **装卸**：走 `dsh plugin --profile web add/remove`，属于 bundle 成员变更，**必须重启 dsh**（启动器自动完成）。
+- **受管区块（managed block）**：启动器在 `cordis.patch.yml` 中拥有的一段（marker 包裹），块外内容逐字节保留。
+- **upstream 插件 / 自研插件**：`upstream` 参与自动同步（npm 版本或 git commit）；`in-house`（本地路径/link/tarball）**永不被同步任务改动**。
+
+## 技能共享（ADR-0005）
+
+- **共享真源（canonical store）**：`~/.agents/agent`（`skills/`、`AGENTS.md`、`CONTEXT.md`）。
+- **共享模式**：`link`（`~/.dsh` 下同名资源链接到真源）| `config`（写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块，让 dsh 直接读真源）。
+- **资源状态**：`missing` | `linked` | `config` | `conflict`（真实文件/目录，绝不自动删除）| `broken`（链接指向别处或断裂）。
+
 ## 镜像源（镜像维度）
 
 - **npm registry**：npm 通道装包 + pnpm 依赖安装的 registry。

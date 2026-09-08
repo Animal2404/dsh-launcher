@@ -3,5 +3,7 @@
 pub mod config;
 pub mod dsh;
 pub mod logs;
+pub mod plugin;
+pub mod skill;
 pub mod toolchain;
 pub mod version;

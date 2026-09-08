@@ -305,7 +305,7 @@ impl ProcessManager {
 
         self.spawn_monitor(pid);
         // v0.2.7：启动探活线程——端口监听则置 Running；
-        // 进程退出且端口未监听（启动即崩）→ 自动修复不兼容插件并重试
+        // 进程退出且端口未监听（启动即崩）→ 归因并隔离不兼容插件（ADR-0005 D12）
         self.spawn_startup_probe(port, pid);
 
         Ok(())
@@ -534,25 +534,27 @@ impl ProcessManager {
                     return;
                 }
                 if !alive {
-                    // 进程已退出且端口未监听：启动即崩，尝试自动修复不兼容插件
+                    // 进程已退出且端口未监听：启动即崩，尝试归因并隔离不兼容插件
                     logger.log(
                         LogSource::Launcher,
                         LogLevel::Warn,
-                        "dsh 进程启动后即退出且端口未监听，尝试自动修复不兼容插件…",
+                        "dsh 进程启动后即退出且端口未监听，尝试归因不兼容插件…",
                     );
-                    let ok = Self::fix_incompatible_plugins(&logger);
-                    if ok {
-                        logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Info,
-                            "已自动修复不兼容插件（dshmarket）；请再次点击启动",
-                        );
-                    } else {
-                        logger.log(
-                            LogSource::Launcher,
-                            LogLevel::Error,
-                            "自动修复未生效，请检查日志定位启动失败原因",
-                        );
+                    match crate::core::plugin::handle_boot_failure(&logger) {
+                        Some(package) => {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Info,
+                                &format!("已隔离不兼容插件（{package}，禁用其行）；请再次点击启动"),
+                            );
+                        }
+                        None => {
+                            logger.log(
+                                LogSource::Launcher,
+                                LogLevel::Error,
+                                "自动归因未命中具体插件（不做任何自动卸载）；请在“插件”面板中逐个禁用排查",
+                            );
+                        }
                     }
                     // 无论是否修复，本次启动的进程已死：状态复位
                     let mut s = status_arc.lock().unwrap();
@@ -575,66 +577,6 @@ impl ProcessManager {
                 &format!("dsh 启动 8 秒后端口 {port} 仍未监听（进程存活），状态保持启动中"),
             );
         });
-    }
-
-    /// 自动修复不兼容插件：dshmarket 与当前 dsh-settings API 不兼容时卸载之。
-    /// 返回是否执行了卸载（幂等：dshmarket 不在依赖中时返回 false）。
-    fn fix_incompatible_plugins(logger: &Arc<Logger>) -> bool {
-        // 仅当 dsh 安装目录存在时处理（GitHub 通道安装的 dsh）
-        let install = crate::core::github::github_clone_dir();
-        if !install.join("package.json").exists() {
-            return false;
-        }
-        // 检查 web profile 是否仍依赖 dshmarket
-        let list = {
-            let mut c = crate::core::command::hidden_cmd("pnpm");
-            c.args(["dsh", "plugin", "--profile", "web", "list"])
-                .current_dir(&install);
-            c.output()
-        };
-        let still_has = match list {
-            Ok(out) => crate::core::text::decode(&out.stdout).contains("dshmarket"),
-            Err(_) => false,
-        };
-        if !still_has {
-            return false;
-        }
-        logger.log(
-            LogSource::Launcher,
-            LogLevel::Info,
-            "检测到 web profile 含 dshmarket，执行卸载以修复兼容性…",
-        );
-        let un = {
-            let mut c = crate::core::command::hidden_cmd("pnpm");
-            c.args(["dsh", "plugin", "--profile", "web", "uninstall", "dshmarket"])
-                .current_dir(&install);
-            c.output()
-        };
-        match un {
-            Ok(out) if out.status.success() => {
-                logger.log(LogSource::Launcher, LogLevel::Info, "dshmarket 已卸载");
-                true
-            }
-            Ok(out) => {
-                logger.log(
-                    LogSource::Launcher,
-                    LogLevel::Error,
-                    &format!(
-                        "卸载 dshmarket 失败: {}",
-                        decode_console_text(&out.stderr).trim()
-                    ),
-                );
-                false
-            }
-            Err(e) => {
-                logger.log(
-                    LogSource::Launcher,
-                    LogLevel::Error,
-                    &format!("执行插件卸载失败: {e}"),
-                );
-                false
-            }
-        }
     }
 
     /// 后台监视线程：tail dsh 输出落盘文件写日志/捕获 URL + 进程退出时更新状态
@@ -858,6 +800,11 @@ fn dsh_output_path(stdout: bool) -> std::path::PathBuf {
         "dsh-web-stderr.log"
     };
     crate::core::logging::logs_dir().join(name)
+}
+
+/// dsh stderr 落盘文件路径（启动失败归因用；ADR-0005 D12）
+pub fn dsh_stderr_path() -> std::path::PathBuf {
+    dsh_output_path(false)
 }
 
 /// 打开 dsh 输出落盘文件（每次启动截断重建；返回可写 File 供 Stdio::from）

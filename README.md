@@ -10,6 +10,12 @@
 - **Web GUI 集成**：内嵌 Tauri 窗口打开 dsh Web UI（自动携带 token 免认证），或外部浏览器 / 桌面快捷方式
 - **系统托盘**：打开主窗口 / 启动 / 停止 / 重启 / 退出，可配置"退出时驻留 dsh"
 - **全局日志**：dsh 与启动器日志统一落盘（按天轮转 + 切割 + 保留 30 天），前端实时流式展示
+- **插件管理**（ADR-0005）：按包名独立启停（写 profile 受管 patch 区块，dsh 热重载，无需重启）、
+  装卸（官方 `dsh plugin` 通道，自动重启）、upstream 自动同步（npm 版本 / git commit，git 钉 sha），
+  自研插件（本地路径）不参与同步
+- **技能共享**（ADR-0005）：以 `~/.agents/agent` 为唯一真源，把 `skills/`、`AGENTS.md`、`CONTEXT.md`
+  共享给 `~/.dsh`（链接模式；无符号链接权限时降级为 home 层配置模式）
+- **命令行**：`dsh-launcher plugin|skill ...`（与 GUI 共用同一套逻辑，便于脚本化/CI 验收）
 
 ## 安装
 
@@ -24,7 +30,19 @@ npm run build        # 前端构建（tsc + vite build）
 npm run tauri build  # 打包安装包（NSIS）
 ```
 
-Rust 后端入口在 `src-tauri/src/`（`core/` 核心逻辑 + `commands/` Tauri IPC），前端在 `src/`。
+Rust 后端入口在 `src-tauri/src/`（`core/` 核心逻辑 + `commands/` Tauri IPC + `cli.rs` 无 GUI CLI），前端在 `src/`。
+
+命令行（无需 GUI，适合脚本化验收）：
+
+```bash
+dsh-launcher plugin list [--json]
+dsh-launcher plugin enable|disable|uninstall <package>
+dsh-launcher plugin install <spec> [--origin upstream|in-house]
+dsh-launcher plugin sync [--check]        # 同步 upstream 插件（--check 只检查）
+dsh-launcher skill status [--json]
+dsh-launcher skill apply [--mode auto|link|config]
+dsh-launcher skill migrate [--dry-run]    # 迁移冲突资源（原文件改名保留，绝不删除）
+```
 
 ## 持续集成与发布
 
@@ -39,7 +57,7 @@ Rust 后端入口在 `src-tauri/src/`（`core/` 核心逻辑 + `commands/` Tauri
 
 - `CONTEXT.md`：术语表
 - `docs/DESIGN.md`：设计总览
-- `docs/adr/`：架构决策记录（ADR-0001~0004）
+- `docs/adr/`：架构决策记录（ADR-0001~0005）
 
 ## 技术栈
 

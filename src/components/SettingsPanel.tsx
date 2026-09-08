@@ -51,6 +51,7 @@ export default function SettingsPanel() {
     keepDshHomeOnUninstall: true,
     autoStartDsh: false,
     autoOpenBrowser: true,
+    autoSyncPlugins: true,
   });
   // 最新开关快照（供异步提交与失败回滚使用，避免陈旧闭包）
   const switchesRef = useRef(switches);
@@ -72,6 +73,7 @@ export default function SettingsPanel() {
         keepDshHomeOnUninstall: c.keepDshHomeOnUninstall,
         autoStartDsh: c.autoStartDsh,
         autoOpenBrowser: c.autoOpenBrowser,
+        autoSyncPlugins: c.autoSyncPlugins,
       });
     } catch (e) {
       console.error("读取配置失败", e);
@@ -251,6 +253,7 @@ export default function SettingsPanel() {
                 ["keepDshHomeOnUninstall", "卸载保留数据"],
                 ["autoStartDsh", "启动时自动启动"],
                 ["autoOpenBrowser", "启动时打开浏览器"],
+                ["autoSyncPlugins", "自动同步上游插件"],
               ] as const
             ).map(([key, label]) => (
               <div key={key} className="flex items-center justify-between gap-2">
