@@ -342,6 +342,10 @@ pub fn run() {
             commands::skill::skill_status,
             commands::skill::skill_apply,
             commands::skill::skill_migrate,
+            commands::mcp::mcp_list,
+            commands::mcp::mcp_add,
+            commands::mcp::mcp_remove,
+            commands::mcp::mcp_set_state,
         ])
         .run(tauri::generate_context!())
         // v0.4.13（审计修复 2.9）：release 无控制台时 panic 不可见，改为

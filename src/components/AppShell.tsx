@@ -37,22 +37,24 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
+  Plug,
   Puzzle,
   Settings as SettingsIcon,
   Sparkles,
   X,
 } from "lucide-react";
 
-/** 底部管理入口（顺序固定：插件 | 技能 | 设置，见 ADR-0005 D11） */
-export type ShellPanel = "plugins" | "skills" | "settings";
+/** 底部管理入口（顺序固定：MCP | 插件 | 技能 | 设置，见 ADR-0006 D14） */
+export type ShellPanel = "mcp" | "plugins" | "skills" | "settings";
 
-/** 底部三按钮入口定义（顺序即渲染顺序） */
+/** 底部四按钮入口定义（顺序即渲染顺序，MCP 最左） */
 const PANEL_ENTRIES: {
   key: ShellPanel;
   label: string;
   title: string;
   Icon: typeof Puzzle;
 }[] = [
+  { key: "mcp", label: "MCP", title: "MCP server 管理", Icon: Plug },
   { key: "plugins", label: "插件", title: "插件管理", Icon: Puzzle },
   { key: "skills", label: "技能", title: "技能共享", Icon: Sparkles },
   { key: "settings", label: "设置", title: "打开设置", Icon: SettingsIcon },
@@ -202,7 +204,7 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
             {/* 标题已移至主内容区（titlebar），侧栏不再含标题/描述 */}
             <div className="sidebar-body">
               <StatusCard />
-              {/* 底部：管理入口按钮组（插件 | 技能 | 设置），分割线分隔 */}
+              {/* 底部：管理入口按钮组（MCP | 插件 | 技能 | 设置），分割线分隔 */}
               <div className="mt-auto flex flex-col pt-4">
                 <Separator className="mb-3" />
                 <div

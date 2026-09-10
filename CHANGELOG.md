@@ -1,5 +1,80 @@
 # Changelog
 
+## [0.7.0] - 2026-09-10
+
+> 本版为 **ADR-0006（三类能力的官方合规收敛）** 施工结果，分两部分：**Part A** 新增 MCP Server
+> 管理；**Part B** 对既有插件管理与技能共享做官方合规核验与修复。硬边界：未修改
+> `deepseek-harness` 任何代码；未新增退出码；未引入新依赖。
+
+### 新增（Part A — MCP Server 管理）
+
+- **MCP Server 管理**：按 `serverName` 独立管理 `list / add / remove / enable / disable`
+  （官方 `config.serverName`，工具命名空间 `mcp__<serverName>__<tool>`）。
+  - 落点为机器级 `$DSH_HOME/cordis.patch.yml` 的**受管 MCP 区块**（marker `dsh-launcher mcp v1`），
+    **两段式**：`- insert:` 声明段 + `- id:`/`disabled:` 定向段；块外内容逐字节保留。
+  - `config` 采用**不透明保真**：以逐行原始文本存取，`!!js` 表达式、内嵌注释与未建模字段
+    零损失；`enable` / `disable` / `remove` **绝不重渲染** `config`。
+  - `list` 覆盖**合成树全量** mcp 行（含 bundle / profile patch / 用户手写 / `--patch`），
+    每行标 `origin`（`managed` / `external`）与**来源层**（dump 段标签绝对路径）。
+  - `remove` 语义二分：`managed` 真删除（声明 + 定向）；`external` **仅撤销定向覆盖**
+    （声明仍在，服务器恢复默认启用），UI/CLI 文案明确区分。
+  - 三类变更**都不重启 dsh**（受管 profile `web` 为 `patchReload: "live"`，官方就地热重载）。
+- **底部四按钮入口**：`MCP | 插件 | 技能 | 设置`（MCP 最左）；新增 **MCP 面板**
+  （与插件面板同构；`remove` 复用既有确认弹窗模式，文案区分 managed/external）。
+- **危险字段护栏**：`failOnStartupError: true` 会使整个 harness 启动中止，故
+  `list` 对该行打**危险徽章**并提示后果，结构化新增通道**不暴露**该字段（仅原始 YAML 通道可表达）。
+- **CLI**：`dsh-launcher mcp list|add|remove|enable|disable [--json]`，`add` 支持全部官方字段
+  选项（`--raw-config` 与结构化字段互斥），复用既有退出码分级（0/2/3/6/7/8）。
+- **Tauri IPC**：`mcp_list` / `mcp_add` / `mcp_remove` / `mcp_set_state` + 事件 `mcp://changed`。
+
+### 修复（Part B — 插件与技能的官方合规修复）
+
+- **A1/A2（P0）技能共享真源改锚官方根（D17）**：真源由 `~/.agents/agent` 改为**官方
+  `agentsHome` 根**（默认 `~/.agents`）——技能 = `~/.agents/skills`（官方 `skill-filesystem`
+  的 `user-agents` 根，rank 500）；指令 = `~/.agents/AGENTS.md`。
+  - **技能不再需要任何链接**（rank 500 原生覆盖）；`<dshHome>/CONTEXT.md` **不再建链接**
+    （dsh 不读该文件）；仅 `<dshHome>/AGENTS.md` 保留一条指向 `~/.agents/AGENTS.md` 的链接。
+  - 修复前现场：`~/.dsh` 三条链接**全部断链**、真源目录为空，而官方根有 93 个有效技能
+    → 技能共享实际未生效、用户全局指令未被 dsh 读取。修复后 `~/.dsh` **无断链**、
+    技能计数 **93**、指令内容与真源逐字节一致。
+  - 新增 `dsh-launcher skill repair-links`：一次性、**可幂等重跑**的迁移动作 —— 修复指令链接、
+    清理**启动器自己创建**的断链、保留一切真实文件/目录与用户自建链接（**零删除用户内容**）。
+  - 资源状态新增 `native`（该资源不需要链接，真源已由官方扫描根覆盖）；判定链改为
+    「链接 → 真实文件 → 原生根」，避免视图侧遗留断链被误判成 `native`。
+- **A3/P6 失败回滚写入收敛 + 备份路径修正（D18）**：
+  - `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` / `cordis.patch.yml` 的写入
+    收敛为**唯一一处** `rollback_after_failed_official_op()`，并显式登记为白名单**唯一例外**
+    （官方无"回退到任意历史 lock 状态"的能力），其后**必跟**一次官方通道
+    `dsh plugin … install` 收敛。
+  - 备份落点由文件名改为**备份子路径**：修复了同目录下三个同名不同义文件互相覆盖、
+    回滚会写入另一个文件备份内容的缺陷。
+- **A4 删除 `allowBuilds` 规格（不补实现）**：该键属 **pnpm 配置**而非 dsh 官方接口，
+  故删除"由启动器写入并复跑"的规格，改为把 pnpm 输出原样转发，由用户自行处理；
+  面板文案同步更正（不再指示用户手改 pnpm 配置）。
+- **A5 收窄验证口径**：明确 `--dump-config` **不启动插件**、只证明**配置合成层**的写入正确性，
+  **不得**充当运行态生效证据；运行态可见证据只有 dsh stderr 的 logger 行 + 有界窗口
+  （官方不存在列 MCP/插件状态或列工具的 CLI）。
+
+### 变更
+
+- **受管区块通用层**：`core/plugin/managed.rs` 抽出「按 marker 家族读写区块」的通用层
+  （marker 前缀 / 版本 / 渲染器参数化），managed / shared / **mcp** 三个家族共用同一段
+  定位、`[]` 占位符处理、块外逐字节保留与幂等判定。
+- **同文件写入互斥**：新增按规范化路径区分的 `file_write_lock`（线程局部可重入），
+  使 `$DSH_HOME/cordis.patch.yml` 上 ADR-0005 的 `shared` 区块与新 MCP 区块**写入互斥**。
+- **构建脚本**：为 `tests/*` 产物嵌入 Common Controls v6 清单（`tauri build` 只为应用 bin 加），
+  修复触及 tauri 依赖链的集成测试在加载期以 `STATUS_ENTRYPOINT_NOT_FOUND` 终止的问题。
+- **文档**：`CONTEXT.md` 增 MCP 词条组并更新技能共享锚点（新增 `native` 资源状态、`needs_link`
+  判定、`repair-links` 动作、白名单唯一例外）。
+- **运行时文件系统**：新增备份目录 `%LOCALAPPDATA%\dsh-launcher\backups\mcp\<serverName>\<ts>\`；
+  **未新增任何持久化状态文件**（MCP 的期望态与现状均由受管区块 + 合成树表达，磁盘即事实源）。
+
+### 测试
+
+- 单元测试 `139`（+47）、集成测试 `16`（`mcp_pipeline_test`，临时 `DSH_HOME` + 假 `dsh`）、
+  Part B 合规回归 `15`（`part_b_compliance_test`）；ADR-0005 既有用例**零改动**全绿。
+- 端到端脚本 `scripts/e2e-adr0006.ps1`（真实 dsh + 隔离 `DSH_HOME`）：**61 项断言全通过**。
+
 ## [0.6.0] - 2026-09-10
 
 ### 新增
@@ -16,7 +91,8 @@
     永不改动。
   - 启动崩溃自动归因：从 dsh stderr 命中插件则**禁用其行**（可逆），不再硬编码卸载 dshmarket。
 - **技能共享管理（ADR-0005）**：以 `~/.agents/agent` 为唯一真源，统一 `skills/`、`AGENTS.md`、
-  `CONTEXT.md`。
+  `CONTEXT.md`。**（注：0.7.0 的 ADR-0006 D17 已把真源改锚到官方 `agentsHome` 根 ——
+  技能 = `~/.agents/skills`、指令 = `~/.agents/AGENTS.md`；本条保留原发布时的事实。）**
   - Mode L（默认）：`~/.dsh` 下同名资源建立链接（目录用 junction 免特权，文件用符号链接）；
   - Mode C（降级）：无文件符号链接权限时，写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块
     （`skill-filesystem.agentsHome` / `agent-instructions.dshHome`），dsh 直接读真源；

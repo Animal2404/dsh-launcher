@@ -1,11 +1,12 @@
 // dsh-launcher 主界面：dark 主题
 // 布局：三栏（左侧栏 状态+工具链 / 中央 版本管理 / 右侧 日志），骨架见 AppShell
-// 管理入口：侧栏底部按钮组（插件 | 技能 | 设置）→ 对应 Dialog（状态在本组件管理）
+// 管理入口：侧栏底部按钮组（MCP | 插件 | 技能 | 设置）→ 对应 Dialog（状态在本组件管理）
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import AppShell, { type ShellPanel } from "@/components/AppShell";
 import SettingsPanel from "@/components/SettingsPanel";
 import PluginsPanel from "@/components/PluginsPanel";
+import McpPanel from "@/components/McpPanel";
 import SkillsPanel from "@/components/SkillsPanel";
 import { Toaster } from "@/components/ui/sonner";
 import {
@@ -15,8 +16,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-/** 各面板的标题与最大宽度（插件/技能内容更宽） */
+/** 各面板的标题与最大宽度（MCP/插件/技能内容更宽） */
 const PANEL_META: Record<ShellPanel, { title: string; className: string }> = {
+  mcp: {
+    title: "MCP server 管理",
+    className: "max-h-[85vh] w-full max-w-2xl overflow-y-auto",
+  },
   plugins: {
     title: "插件管理",
     className: "max-h-[85vh] w-full max-w-2xl overflow-y-auto",
@@ -57,7 +62,7 @@ export default function App() {
         onOpenPanel={(next) => setPanel(next)}
       />
 
-      {/* 管理面板弹出子窗口（Dialog）：插件 / 技能 / 设置 */}
+      {/* 管理面板弹出子窗口（Dialog）：MCP / 插件 / 技能 / 设置 */}
       {(Object.keys(PANEL_META) as ShellPanel[]).map((key) => (
         <Dialog
           key={key}
@@ -68,6 +73,7 @@ export default function App() {
             <DialogHeader>
               <DialogTitle>{PANEL_META[key].title}</DialogTitle>
             </DialogHeader>
+            {key === "mcp" && <McpPanel />}
             {key === "plugins" && <PluginsPanel />}
             {key === "skills" && <SkillsPanel />}
             {key === "settings" && <SettingsPanel />}

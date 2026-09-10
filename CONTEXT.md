@@ -35,9 +35,26 @@
 
 ## 技能共享（ADR-0005）
 
-- **共享真源（canonical store）**：`~/.agents/agent`（`skills/`、`AGENTS.md`、`CONTEXT.md`）。
-- **共享模式**：`link`（`~/.dsh` 下同名资源链接到真源）| `config`（写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块，让 dsh 直接读真源）。
-- **资源状态**：`missing` | `linked` | `config` | `conflict`（真实文件/目录，绝不自动删除）| `broken`（链接指向别处或断裂）。
+- **共享真源（canonical store）**：**官方 `agentsHome` 根**（默认 `~/.agents`）——技能 = `~/.agents/skills`（官方 `skill-filesystem` 的 `user-agents` 根，rank 500）；指令 = `~/.agents/AGENTS.md`；词表 = `~/.agents/CONTEXT.md`（dsh 不读）。**不再是 `~/.agents/agent`**（ADR-0006 D17 修订）。
+- **共享模式**：`link`（`<dshHome>/AGENTS.md` 链接到真源；技能**无需链接**，由官方 rank 500 原生覆盖）| `config`（写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块，让 dsh 直接读真源）。
+- **资源状态**：`missing` | `linked` | `config` | `conflict`（真实文件/目录，绝不自动删除）| `broken`（链接指向别处或**断裂**）| `native`（该资源**不需要**链接，真源已由官方扫描根原生覆盖）。
+- **需要链接判定（`needs_link`）**：由官方事实决定 —— `agents-md` **需要**（官方固定读 `<dshHome>/AGENTS.md`）；`skills` 与 `context-md` **不需要**（技能走官方 rank 500 根；dsh 不读 `CONTEXT.md`）。判定链顺序为「链接 → 真实文件 → 原生根」，因此视图侧遗留的**断链**不会被误判成 `native`。
+- **链接修复动作（`skill repair-links`）**：一次性、**可幂等重跑**的迁移动作 —— 修复需要链接的资源；清理**启动器自己创建的断链**（目标落在 `agentsHome` 下的）；保留一切含用户内容的真实文件/目录，以及指向 `agentsHome` **之外**的用户自建链接。绝不删除用户内容。
+- **白名单唯一例外（失败回滚）**：官方无"回退到任意历史 lock 状态"的能力，故 `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` / `cordis.patch.yml` 仅允许在**失败回滚**时由备份还原写入（`core/plugin/mod.rs::rollback_after_failed_official_op` **一处**），且其后**必跟**一次官方通道 `dsh plugin … install` 收敛（ADR-0006 D18）。
+
+## MCP server 管理（ADR-0006）
+
+- **MCP server 条目**：cordis 配置树中的一行，`name: '@deepseek-ai/dsh-mcp-client'`，其 `config.serverName` 是该服务器面向模型的命名空间。一个条目 = 一个 MCP server。仅桥接 Tools（resources / prompts 不支持）。
+- **serverName**：条目的面向模型命名空间，工具名形如 `mcp__<serverName>__<tool>`。须匹配 `[A-Za-z0-9_-]{1,32}`，且在同一**注册作用域**内唯一。启动器以它作为管理标识键（而非行 id）。
+- **行 id（rowId）**：条目的 cordis 标识；启动器声明的行固定用 `mcp-<serverName>`。
+- **受管 MCP 区块（managed MCP block）**：启动器在 `$DSH_HOME/cordis.patch.yml`（机器级）中拥有的一段（marker 包裹），**两段式**——`insert:` 声明段 + `id`/`disabled:` 定向段。块外内容逐字节保留。
+- **受管声明 / 外部声明**：条目的 `- insert:` 行位于受管区块内 = **受管声明**（`remove` 可真删除）；由 bundle、profile patch、home 文件用户区或 `--patch` 给出 = **外部声明**（`remove` 仅撤销定向覆盖，声明仍在）。
+- **定向覆盖（id-targeted override）**：`- id: <rowId>` + `disabled:` 形式的独立 patch 条目，用于覆盖既有行的启停；可命中同层后置条目与**全部更早层**（home 层是最后持久层，故机器级定向覆盖对全层有效）。
+- **注册作用域（registration scope）**：官方对 `serverName` 唯一性的强制范围；同一作用域内重复时，**后加载的实例在加载期失败，先前实例不受影响**。启动器只管理 root 作用域。
+- **MCP 状态**：`missing`（合成树无该 serverName 的行）| `enabled`（有效 `disabled != true`）| `disabled`（有效 `disabled == true`）。行级另有无状态标记：`expression`（`disabled` 为 `!!js`，拒绝覆盖）| `conflict`（serverName 重复）| `dangerous`（`failOnStartupError: true`，可使 harness 启动中止）。
+- **MCP 前置（prerequisite）**：`@deepseek-ai/dsh-mcp-client` 在受管 profile 的**可解析性**（非 `dependencies` 成员、非 bundle）；缺失时 MCP 页显示横幅并引导至插件页安装，**MCP 页不重复建设装卸入口**。
+- **危险字段 `failOnStartupError`**：官方默认 `false`（失败仅 warn、harness 照常启动）；设为 `true` 时初始连接失败会让该 fiber FAILED，进而使**整个 harness 启动中止**。故 `disabled: true` 是该行唯一安全的隔离手段；启动器结构化通道不暴露该字段。
+- **可观测性边界**：官方**不存在**列 MCP 状态或列工具的 CLI；`--dump-config` **不启动插件**、只证明**配置合成层**；`pluginInventory/list` 为 Remote-only 且不含 `serverName` 与 `mcp__*` 工具名。故脚本化证据只有「重新 dump 的目标行 `disabled`」与「dsh stderr 的 logger 行 + 有界窗口」，工具是否出现由人工确认（ADR-0006 D12 / §Testing 3.3）。
 
 ## 镜像源（镜像维度）
 

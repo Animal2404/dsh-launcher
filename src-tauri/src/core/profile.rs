@@ -233,18 +233,28 @@ pub fn dependency_names(dir: &Path) -> Result<Vec<String>, PluginError> {
 }
 
 /// 备份若干文件到 `dest` 目录（不存在或读取失败的文件跳过），返回备份清单。
-pub fn backup_files(files: &[PathBuf], dest: &Path) -> Result<Vec<PathBuf>, PluginError> {
+///
+/// `files` 为 `(绝对路径, 备份子路径)`。**子路径参与落点**：早先按 `file_name()`
+/// 落盘，而 `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` 在同一
+/// profile 目录下**同名不同义**，导致三个备份互相覆盖 —— 回滚会写入**另一个文件
+/// 的备份内容**。用子路径隔离后每个目标各自独立（ADR-0006 P6）。
+pub fn backup_files(
+    files: &[(PathBuf, PathBuf)],
+    dest: &Path,
+) -> Result<Vec<PathBuf>, PluginError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| PluginError::internal(format!("创建备份目录 {} 失败: {e}", dest.display())))?;
     let mut saved = Vec::new();
-    for file in files {
+    for (file, sub_path) in files {
         if !file.exists() {
             continue;
         }
-        let Some(name) = file.file_name() else {
-            continue;
-        };
-        let target = dest.join(name);
+        let target = dest.join(sub_path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                PluginError::internal(format!("创建备份目录 {} 失败: {e}", parent.display()))
+            })?;
+        }
         std::fs::copy(file, &target).map_err(|e| {
             PluginError::internal(format!(
                 "备份 {} → {} 失败: {e}",
@@ -257,14 +267,14 @@ pub fn backup_files(files: &[PathBuf], dest: &Path) -> Result<Vec<PathBuf>, Plug
     Ok(saved)
 }
 
-/// 用备份覆盖回原文件（按文件名匹配）。
-pub fn restore_files(backup_dir: &Path, targets: &[PathBuf]) -> Result<Vec<String>, PluginError> {
+/// 用备份覆盖回原文件（按**备份子路径**匹配，绝不按文件名匹配）。
+pub fn restore_files(
+    backup_dir: &Path,
+    targets: &[(PathBuf, PathBuf)],
+) -> Result<Vec<String>, PluginError> {
     let mut restored = Vec::new();
-    for target in targets {
-        let Some(name) = target.file_name() else {
-            continue;
-        };
-        let source = backup_dir.join(name);
+    for (target, sub_path) in targets {
+        let source = backup_dir.join(sub_path);
         if !source.exists() {
             continue;
         }
@@ -328,11 +338,48 @@ mod tests {
         let bak = root.join("bak");
         std::fs::create_dir_all(&src).unwrap();
         let file = src.join("package.json");
+        let targets = vec![(file.clone(), PathBuf::from("package.json"))];
         std::fs::write(&file, "{\"a\":1}").unwrap();
-        backup_files(std::slice::from_ref(&file), &bak).unwrap();
+        backup_files(&targets, &bak).unwrap();
         std::fs::write(&file, "{\"a\":2}").unwrap();
-        restore_files(&bak, std::slice::from_ref(&file)).unwrap();
+        restore_files(&bak, &targets).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"a\":1}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 同目录同名不同义的三个 profile 文件必须各自独立备份（ADR-0006 P6）
+    #[test]
+    fn test_backup_keeps_same_named_profile_files_separate() {
+        let root = std::env::temp_dir().join(format!("dsh-launcher-backup-sep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("profile");
+        let bak = root.join("bak");
+        std::fs::create_dir_all(&src).unwrap();
+        // 三个文件在同一目录，各自内容不同（真实形态）
+        let pkg = src.join("package.json");
+        let lock = src.join("pnpm-lock.yaml");
+        let ws = src.join("pnpm-workspace.yaml");
+        std::fs::write(&pkg, "{\"pkg\":1}").unwrap();
+        std::fs::write(&lock, "lockfileVersion: 9").unwrap();
+        std::fs::write(&ws, "packages: []").unwrap();
+        let targets = vec![
+            (pkg.clone(), PathBuf::from("package.json")),
+            (lock.clone(), PathBuf::from("pnpm-lock.yaml")),
+            (ws.clone(), PathBuf::from("pnpm-workspace.yaml")),
+        ];
+        backup_files(&targets, &bak).unwrap();
+        // 破坏全部三个文件
+        std::fs::write(&pkg, "{}").unwrap();
+        std::fs::write(&lock, "").unwrap();
+        std::fs::write(&ws, "").unwrap();
+        restore_files(&bak, &targets).unwrap();
+        // 各归其位（修复前会因同名碰撞互相覆盖）
+        assert_eq!(std::fs::read_to_string(&pkg).unwrap(), "{\"pkg\":1}");
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            "lockfileVersion: 9"
+        );
+        assert_eq!(std::fs::read_to_string(&ws).unwrap(), "packages: []");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

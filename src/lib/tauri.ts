@@ -448,3 +448,120 @@ export function skillApply(
 export function skillMigrate(dryRun: boolean): Promise<MigrateReport> {
   return invoke("skill_migrate", { dryRun });
 }
+
+// ==================== MCP server 管理（ADR-0006） ====================
+
+/** MCP 变更事件名（对应 Rust MCP_CHANGED_EVENT） */
+export const MCP_CHANGED_EVENT = "mcp://changed";
+
+/** 订阅 MCP 变更事件 */
+export async function listenMcpChanged(
+  onChanged: () => void,
+): Promise<UnlistenFn> {
+  return listen(MCP_CHANGED_EVENT, () => {
+    onChanged();
+  });
+}
+
+/** MCP server 三态（对应 Rust McpState） */
+export type McpState = "missing" | "enabled" | "disabled";
+
+/** 声明来源（对应 Rust McpOrigin） */
+export type McpOrigin = "managed" | "external";
+
+/** 行级只读标记（对应 Rust McpMark） */
+export type McpMark = "expression" | "conflict" | "dangerous";
+
+/** transport（官方字段的两个取值） */
+export type McpTransport = "stdio" | "streamable-http";
+
+/** `list.reload`：由 profile 的 `patchReload` 决定 */
+export type McpReload = "live" | "requires-restart";
+
+/** 单个 MCP server 视图（对应 Rust McpServerView） */
+export interface McpServerView {
+  serverName: string;
+  rowId: string;
+  transport: McpTransport | null;
+  state: McpState;
+  origin: McpOrigin;
+  /** 来源层：dump 段标签（绝对路径 / bundle 包名） */
+  layer: string;
+  /** 只读摘要：stdio 取 command + args，streamable-http 取 url */
+  summary: string;
+  /** 有效 disabled；null = `!!js` 表达式（只读，启动器拒绝覆盖） */
+  disabled: boolean | null;
+  marks: McpMark[];
+}
+
+/** MCP 前置（`@deepseek-ai/dsh-mcp-client` 可解析性） */
+export interface McpPrereq {
+  installed: boolean;
+  package: string;
+}
+
+/** MCP 列表结果（对应 Rust McpListResult） */
+export interface McpListResult {
+  profile: string;
+  reload: McpReload;
+  prereq: McpPrereq;
+  servers: McpServerView[];
+}
+
+/** 新增 MCP server 的结构化入参（对应 Rust McpAddSpec） */
+export interface McpAddSpec {
+  serverName: string;
+  transport: McpTransport;
+  rowId?: string | null;
+  startDisabled?: boolean;
+  /** stdio */
+  command?: string | null;
+  args?: string[];
+  env?: [string, string][];
+  cwd?: string | null;
+  /** streamable-http */
+  url?: string | null;
+  headers?: [string, string][];
+  /** 共同可选项（官方字段名） */
+  toolCallTimeoutMs?: number | null;
+  reconnectEnabled?: boolean | null;
+  reconnectInitialDelayMs?: number | null;
+  reconnectMaxDelayMs?: number | null;
+  reconnectMaxAttempts?: number | null;
+  /**
+   * 原始通道：官方 config 体的原始 YAML 片段（与结构化字段互斥）。
+   * 用于 `!!js` / 注释 / 暂未建模的官方字段透传。
+   */
+  rawConfig?: string | null;
+}
+
+/** MCP 操作结果（`restarted` 恒为 false：MCP 变更不重启 dsh） */
+export interface McpOpResult {
+  status: "changed" | "unchanged";
+  restarted: boolean;
+  message: string;
+  serverName: string | null;
+}
+
+/** 列出合成树全量 MCP server */
+export function mcpList(): Promise<McpListResult> {
+  return invoke("mcp_list");
+}
+
+/** 新增 MCP server（写机器级受管 MCP 区块） */
+export function mcpAdd(spec: McpAddSpec): Promise<McpOpResult> {
+  return invoke("mcp_add", { spec });
+}
+
+/** 删除 MCP server（managed 真删除；external 仅撤销定向覆盖） */
+export function mcpRemove(serverName: string): Promise<McpOpResult> {
+  return invoke("mcp_remove", { serverName });
+}
+
+/** 启用/禁用 MCP server（只写定向行，config 绝不重渲染） */
+export function mcpSetState(
+  serverName: string,
+  enabled: boolean,
+): Promise<McpOpResult> {
+  return invoke("mcp_set_state", { serverName, enabled });
+}

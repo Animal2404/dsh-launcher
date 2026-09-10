@@ -1,8 +1,7 @@
 # 布局验证脚本（仅开发验证用）
-# ⚠️ v0.4.13 标注：本脚本的期望值与当前实现已脱节（审计 T18）——
-#   面板默认宽度已改为 340/340（panel-layout.ts）、localStorage 键带 -v3 后缀
-#   （AppShell.tsx），按脚本运行必然 FAIL，请勿当作回归依据。
-#   需要重新使用时请按 src/lib/panel-layout.ts 与 AppShell.tsx 的当前常量/键名重写断言。
+# v0.7.0 标注（ADR-0006 T8）：期望值已按 src/lib/panel-layout.ts 与 AppShell.tsx
+# 的当前常量/键名对齐 —— 面板默认宽 340/340、min 200/280、max 480/1200，
+# localStorage 键带 -v3 后缀；日志收起按钮只含图标（无文本），以 title 属性断言。
 # 验证：titlebar(窗口标题栏) / 右下日志贯穿 / 展开收起 / 拖拽 resize / 持久化 / 响应式断点
 from playwright.sync_api import sync_playwright
 
@@ -34,8 +33,8 @@ with sync_playwright() as p:
     mb = page.locator(".app-main").bounding_box()
     rb = page.locator(".right-panel-container").bounding_box()
     check("三栏存在", bool(sb and mb and rb), f"sidebar.w={sb['width'] if sb else 0:.0f} main.w={mb['width'] if mb else 0:.0f} right.w={rb['width'] if rb else 0:.0f}")
-    check("Sidebar 默认宽 260", abs((sb["width"] if sb else 0) - 260) < 2, f"width={sb['width'] if sb else 0:.0f}")
-    check("Right Panel 默认宽 640", abs((rb["width"] if rb else 0) - 640) < 2, f"width={rb['width'] if rb else 0:.0f}")
+    check("Sidebar 默认宽 340", abs((sb["width"] if sb else 0) - 340) < 2, f"width={sb['width'] if sb else 0:.0f}")
+    check("Right Panel 默认宽 340", abs((rb["width"] if rb else 0) - 340) < 2, f"width={rb['width'] if rb else 0:.0f}")
 
     # 2. 右侧日志面板贯穿窗口顶（y=0，覆盖标题栏右侧区域）
     check("日志面板贯穿窗口顶(y=0)", bool(rb) and abs((rb["y"] if rb else 999) - 0) < 2, f"y={rb['y'] if rb else 0:.0f}")
@@ -43,8 +42,8 @@ with sync_playwright() as p:
     # 3. 标题栏按钮顺序：版本|最小化|最大化|关闭|日志收起（日志在关闭按钮右边=最后；设置已移到侧栏底部）
     tb_btns = page.locator(".titlebar button").count()
     check("标题栏按钮数=5(侧栏/最小/最大/关闭/日志)", tb_btns == 5, f"count={tb_btns}")
-    log_btn = page.locator(".titlebar button").nth(4).inner_text()
-    check("日志按钮在标题栏最右(关闭按钮右边)", "收起" in log_btn or "日志" in log_btn, f"text={log_btn!r}")
+    log_btn_title = page.locator(".titlebar button").nth(4).get_attribute("title")
+    check("日志按钮在标题栏最右(关闭按钮右边)", bool(log_btn_title) and "日志" in log_btn_title, f"title={log_btn_title!r}")
     # 侧栏底部设置按钮（独立区域）
     sidebar_set = page.locator(".sidebar-content button[title=\"打开设置\"]")
     check("侧栏底部存在设置按钮", sidebar_set.count() == 1)
@@ -63,7 +62,7 @@ with sync_playwright() as p:
     sidebar_toggle.click()
     page.wait_for_timeout(450)
     sb_reopen = page.locator(".sidebar-container").bounding_box()
-    check("再展开恢复 260", abs((sb_reopen["width"] if sb_reopen else 0) - 260) < 2, f"width={sb_reopen['width'] if sb_reopen else 0:.0f}")
+    check("再展开恢复 340", abs((sb_reopen["width"] if sb_reopen else 0) - 340) < 2, f"width={sb_reopen['width'] if sb_reopen else 0:.0f}")
 
     # 5. 日志面板收起/展开（标题栏日志按钮）
     right_toggle = page.locator(".titlebar button").nth(4)
@@ -71,12 +70,12 @@ with sync_playwright() as p:
     page.wait_for_timeout(450)
     rb_closed = page.locator(".right-panel-container").bounding_box()
     check("日志收起 -> 宽度 0", abs((rb_closed["width"] if rb_closed else 0)) < 2, f"width={rb_closed['width'] if rb_closed else 0:.0f}")
-    btn_text_closed = right_toggle.inner_text()
-    check("收起后按钮变[日志]", "日志" in btn_text_closed, f"text={btn_text_closed!r}")
+    btn_title_closed = right_toggle.get_attribute("title")
+    check("收起后按钮变[展开日志]", bool(btn_title_closed) and "展开" in btn_title_closed, f"title={btn_title_closed!r}")
     right_toggle.click()
     page.wait_for_timeout(450)
     rb_reopen = page.locator(".right-panel-container").bounding_box()
-    check("日志再展开恢复 640", abs((rb_reopen["width"] if rb_reopen else 0) - 640) < 2, f"width={rb_reopen['width'] if rb_reopen else 0:.0f}")
+    check("日志再展开恢复 340", abs((rb_reopen["width"] if rb_reopen else 0) - 340) < 2, f"width={rb_reopen['width'] if rb_reopen else 0:.0f}")
 
     # 6. Sidebar 拖拽 260->320
     sb_handle = page.locator(".sidebar-resize-handle")
@@ -87,7 +86,7 @@ with sync_playwright() as p:
     page.mouse.up()
     page.wait_for_timeout(350)
     sb_after = page.locator(".sidebar-container").bounding_box()
-    check("Sidebar 拖拽 260->320", abs((sb_after["width"] if sb_after else 0) - 320) < 4, f"width={sb['width']:.0f}->{sb_after['width'] if sb_after else 0:.0f}")
+    check("Sidebar 拖拽 340->400", abs((sb_after["width"] if sb_after else 0) - 400) < 4, f"width={sb['width']:.0f}->{sb_after['width'] if sb_after else 0:.0f}")
 
     # 7. Right 拖拽 640->560
     r_handle = page.locator(".right-panel-resize-handle")
@@ -98,17 +97,17 @@ with sync_playwright() as p:
     page.mouse.up()
     page.wait_for_timeout(350)
     rb_after = page.locator(".right-panel-container").bounding_box()
-    check("Right 拖拽 640->560", abs((rb_after["width"] if rb_after else 0) - 560) < 4, f"width={rb['width']:.0f}->{rb_after['width'] if rb_after else 0:.0f}")
+    check("Right 拖拽 340->280(触 min)", abs((rb_after["width"] if rb_after else 0) - 280) < 4, f"width={rb['width']:.0f}->{rb_after['width'] if rb_after else 0:.0f}")
 
     # 8. 持久化 + 重载恢复
-    stored_side = page.evaluate("localStorage.getItem('dsh-launcher-sidebar-width')")
-    stored_right = page.evaluate("localStorage.getItem('dsh-launcher-right-panel-width')")
-    check("宽度已持久化", stored_side == "320" and stored_right == "560", f"sidebar={stored_side} right={stored_right}")
+    stored_side = page.evaluate("localStorage.getItem('dsh-launcher-sidebar-width-v3')")
+    stored_right = page.evaluate("localStorage.getItem('dsh-launcher-right-panel-width-v3')")
+    check("宽度已持久化", stored_side == "400" and stored_right == "280", f"sidebar={stored_side} right={stored_right}")
     page.reload(wait_until="networkidle")
     page.wait_for_timeout(900)
     sb_restored = page.locator(".sidebar-container").bounding_box()
     rb_restored = page.locator(".right-panel-container").bounding_box()
-    check("重载后恢复宽度", abs((sb_restored["width"] if sb_restored else 0) - 320) < 2 and abs((rb_restored["width"] if rb_restored else 0) - 560) < 2, f"sidebar={sb_restored['width'] if sb_restored else 0:.0f} right={rb_restored['width'] if rb_restored else 0:.0f}")
+    check("重载后恢复宽度", abs((sb_restored["width"] if sb_restored else 0) - 400) < 2 and abs((rb_restored["width"] if rb_restored else 0) - 280) < 2, f"sidebar={sb_restored['width'] if sb_restored else 0:.0f} right={rb_restored['width'] if rb_restored else 0:.0f}")
 
     # 8a. 卸载按钮在重启右侧 + 版本管理面板自适应高度 + 左侧描边贯穿窗口顶
     status_btns = page.locator(".sidebar-content button")
@@ -138,10 +137,18 @@ with sync_playwright() as p:
         f"w={line['w']} top={line['top']:.0f} bottom={line['bottom']:.0f} x={line['x']:.0f} sbRight={line['sbRight']:.0f}",
     )
 
-    # 8b. 双通道左右排列（桌面 1600 档 main≈698≥640 两列）+ 每通道最多 8 条
-    npm_h = page.locator("text=npm 通道").bounding_box()
-    gh_h = page.locator("text=GitHub 通道").bounding_box()
-    check("双通道左右排列(标题同排)", bool(npm_h and gh_h) and abs((npm_h["y"] if npm_h else 999) - (gh_h["y"] if gh_h else 0)) < 4 and npm_h["x"] < gh_h["x"], f"npm y={npm_h['y'] if npm_h else 0:.0f} gh y={gh_h['y'] if gh_h else 0:.0f}")
+    # 8b. 双通道切换（v0.5.x 起由"左右两列"改为**按钮组 tab 切换**，同一时刻只渲染一个列表）
+    #     + 每通道最多 8 条（最新 + 7 个历史）
+    npm_tab = page.get_by_role("tab", name="npm 通道")
+    gh_tab = page.get_by_role("tab", name="GitHub 通道")
+    check("双通道 tab 均存在", npm_tab.count() == 1 and gh_tab.count() == 1,
+          f"npm={npm_tab.count()} gh={gh_tab.count()}")
+    npm_tab.click()
+    page.wait_for_timeout(600)
+    npm_head = page.get_by_role("heading", name="npm 通道版本").bounding_box()
+    gh_head = page.get_by_role("heading", name="GitHub 通道版本").count()
+    check("切换后仅渲染当前通道列表", bool(npm_head) and gh_head == 0,
+          f"npmHead={bool(npm_head)} ghHead={gh_head}")
     install_btns = page.get_by_role("button", name="安装", exact=True).count() + page.get_by_role("button", name="当前版本", exact=True).count()
     check("每通道最多 8 条(安装按钮总数≤16)", install_btns <= 16, f"count={install_btns}")
 

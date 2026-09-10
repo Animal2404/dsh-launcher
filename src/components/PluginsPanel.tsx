@@ -245,8 +245,9 @@ export default function PluginsPanel() {
           </Button>
         </div>
         <p className="text-[11px] text-muted-foreground">
-          git 源建议钉 commit（`github:owner/repo#&lt;sha&gt;`）；pnpm 若拒绝执行构建脚本，
-          请按日志提示把包名加入 profile 的 pnpm-workspace.yaml allowBuilds 后再装。
+          git 源建议钉 commit（`github:owner/repo#&lt;sha&gt;`）。
+          pnpm 若拒绝执行构建脚本，请按安装日志的提示自行处理
+          （启动器把 pnpm 输出原样转发，不代写任何 pnpm 配置）。
         </p>
       </div>
 
