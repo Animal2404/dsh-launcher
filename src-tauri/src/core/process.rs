@@ -709,6 +709,21 @@ impl ProcessManager {
             {
                 self.adopt_running(cfg_port);
             }
+            // 自启动实例卡在 Starting 的收敛：启动探活线程只等 8s（dsh 冷启动 + 插件
+            // 加载/pnpm 同步常超此窗口），窗口内端口未开则线程退出、状态滞留 Starting，
+            // 此后再无人把它提升为 Running——于是「内嵌打开」轮询 running 永远等不到，
+            // 报「端口未监听」，而端口其实早已监听（浏览器可直连）。这里每 5s 兜底：
+            // 托管进程存活且端口已监听 → Starting 转 Running。
+            DshStatus::Starting if pid != 0 && port != 0 => {
+                if port::is_port_in_use(port) {
+                    *self.status.lock().unwrap() = DshStatus::Running;
+                    self.logger.log(
+                        LogSource::Launcher,
+                        LogLevel::Info,
+                        &format!("端口探活对账：dsh（端口 {port}）已监听，状态由「启动中」转为「运行中」"),
+                    );
+                }
+            }
             _ => {}
         }
     }
