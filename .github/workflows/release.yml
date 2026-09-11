@@ -41,31 +41,35 @@ jobs:
 
     steps:
       - name: 检出代码（完整历史，用于版本 tag 判断）
-        uses: actions/checkout@v4
+        # pin 到不可变 commit SHA（ADR-0009 D17）
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: 安装 Node.js（22）
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
       - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        # pin SHA 后必须显式传 toolchain（本 action 由 @rev 推断，官方 README）
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: 缓存 cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
       - name: 安装前端依赖
         run: npm ci --include=dev
 
-      - name: 校验（tsc + vite build + cargo check）
+      - name: 校验（版本一致性 + tsc + vite build + cargo check）
         run: |
+          node scripts/check-version-sync.mjs
           npx tsc --noEmit
           npm run build
           cargo check --manifest-path src-tauri/Cargo.toml
@@ -77,6 +81,8 @@ jobs:
         run: |
           git fetch origin master --tags
           git reset --hard origin/master
+          # reset 后版本可能与本地构建所用版本不同 → 复检一致性（ADR-0009 D1）
+          node scripts/check-version-sync.mjs
 
       # 决策：当前版本是否已发布（tag 存在）
       - name: 判断当前版本是否已发布
@@ -122,7 +128,13 @@ jobs:
           $newVersion = "${{ steps.bump.outputs.new }}"
           $lines = Get-Content CHANGELOG.md
           $joined = $lines -join "`n"
-          if ($joined -match "\[$newVersion\]") {
+          # 字面量子串判定（ADR-0009 D3，**已修订口径**）。原写法 -match "\[$newVersion\]"
+          # 经实测**能正确命中**已存在条目（`\[`/`\]` 是转义字面括号，`.` 是单字符通配，
+          # 恰好也能匹配字面点），故原写法**不是**功能缺陷 —— 审计初稿"字符类永不命中"的
+          # 判断有误，已按实测更正。此处改为 Contains 的真实收益是消除歧义：版本号中的 `.`
+          # 在正则里退化为通配符，理论上可命中 `[0x9y0]` 这类非目标文本；Contains 为精确
+          # 字面匹配。属健壮性改进，非缺陷修复。
+          if ($joined.Contains("[$newVersion]")) {
             echo "CHANGELOG 已含 v$newVersion，跳过"
             exit 0
           }
@@ -209,7 +221,7 @@ jobs:
       # 构建安装包 + 创建 Release（tauri-action 自动装 NSIS，产物上传 Release）
       - name: 构建并发布
         if: ${{ !inputs.skip-release }}
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

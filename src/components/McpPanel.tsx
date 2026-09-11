@@ -10,6 +10,7 @@
 // 结构照 PluginsPanel 同构（refresh / run(key, action) / busy / toast / 事件订阅）；
 // remove 复用 ToolchainPanel 的现有确认弹窗模式。**不抽共享 hook、不回改既有面板**（D14）。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,6 +37,7 @@ import {
   type McpTransport,
 } from "@/lib/tauri";
 import { toast } from "sonner";
+import { ChevronRight, Loader2, RefreshCw } from "lucide-react";
 
 /** 状态徽章配色 */
 function stateVariant(state: McpServerView["state"]) {
@@ -98,6 +100,8 @@ const MARK_TITLE: Record<McpMark, string> = {
 export default function McpPanel() {
   const [data, setData] = useState<McpListResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // 手动刷新进行中（与写操作 busy 分离：刷新是只读操作，不阻塞表单）
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pendingRemove, setPendingRemove] = useState<McpServerView | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -132,16 +136,23 @@ export default function McpPanel() {
   useEffect(() => {
     mounted.current = true;
     refresh();
-    let unlisten: (() => void) | undefined;
-    listenMcpChanged(() => {
-      refresh();
-    }).then((fn) => {
-      unlisten = fn;
-    });
     return () => {
       mounted.current = false;
-      unlisten?.();
     };
+  }, [refresh]);
+
+  // 订阅 mcp://changed（新增/删除/启停后由 Rust 广播）
+  // 统一走 useTauriEvent（ADR-0009 D7）：此前用 `.then()` 无 `.catch` 且无竞态保护
+  useRefreshOnEvent(listenMcpChanged, () => refresh(), [refresh]);
+
+  /** 手动刷新（只读，带旋转反馈） */
+  const refreshManual = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      if (mounted.current) setRefreshing(false);
+    }
   }, [refresh]);
 
   /** 统一封装：占用 busy 标记 → 执行 → 刷新 → 提示 */
@@ -225,18 +236,23 @@ export default function McpPanel() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground">
-          profile <span className="font-medium">{data?.profile ?? "web"}</span> ·{" "}
-          {servers.length} 个 MCP server · 变更
-          {needsRestart ? "需重启 dsh 生效" : "就地热重载（不重启 dsh）"}
+      {/* 工具条：窄宽度自动换行（标题组 + 刷新按钮分两行不挤压） */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 text-xs text-muted-foreground">
+          profile <span className="font-medium text-foreground">{data?.profile ?? "web"}</span>
+          <span className="mx-1.5 opacity-40">·</span>
+          {servers.length} 个 MCP server
+          <span className="mx-1.5 opacity-40">·</span>
+          {needsRestart ? "变更需重启 dsh 生效" : "变更就地热重载（不重启 dsh）"}
         </div>
         <Button
           variant="outline"
           size="sm"
-          disabled={busy !== null}
-          onClick={() => refresh()}
+          className="shrink-0"
+          disabled={busy !== null || refreshing}
+          onClick={() => refreshManual()}
         >
+          <RefreshCw className={refreshing ? "animate-spin" : "size-3"} />
           刷新
         </Button>
       </div>
@@ -256,42 +272,46 @@ export default function McpPanel() {
 
       {needsRestart && (
         <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
-          当前 profile 的 <code>patchReload</code> 不是 <code>live</code>
-          ，改动需重启 dsh 才会生效。
+          当前 profile 的 <code className="dsh-code">patchReload</code> 不是{" "}
+          <code className="dsh-code">live</code>，改动需重启 dsh 才会生效。
         </div>
       )}
 
       {/* 新增 */}
       <div className="space-y-2">
         <Label className="text-xs">新增 MCP server（官方字段）</Label>
-        <div className="flex gap-1.5">
+        {/* 命名与传输方式：窄宽度下自动换行，输入框保持弹性 */}
+        <div className="flex flex-wrap items-center gap-1.5">
           <Input
             value={form.serverName}
             onChange={(e) => setForm({ ...form, serverName: e.target.value })}
             placeholder="serverName（^[A-Za-z0-9_-]{1,32}$）"
-            className="text-xs"
+            className="min-w-[12rem] flex-1 text-xs"
           />
           <select
-            className="w-36 shrink-0 rounded-md border bg-background px-1.5 text-xs"
+            className="dsh-select w-36 shrink-0"
             value={form.transport}
             onChange={(e) =>
               setForm({ ...form, transport: e.target.value as McpTransport })
             }
+            title="传输方式"
           >
             <option value="stdio">stdio</option>
             <option value="streamable-http">streamable-http</option>
           </select>
-          <label className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+          <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
             <input
               type="checkbox"
+              className="dsh-checkbox"
               checked={form.useRaw}
               onChange={(e) => setForm({ ...form, useRaw: e.target.checked })}
             />
             原始 YAML
           </label>
-          <label className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground">
+          <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
             <input
               type="checkbox"
+              className="dsh-checkbox"
               checked={form.startDisabled}
               onChange={(e) =>
                 setForm({ ...form, startDisabled: e.target.checked })
@@ -308,57 +328,61 @@ export default function McpPanel() {
             placeholder={
               "官方 config 体原始片段（保 !!js / 注释 / 未建模字段）\nserverName: my-srv\ntransport: stdio\ncommand: my-mcp"
             }
-            className="h-28 w-full rounded-md border bg-background p-2 font-mono text-[11px]"
+            className="dsh-textarea"
           />
         ) : form.transport === "stdio" ? (
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             <Input
               value={form.command}
               onChange={(e) => setForm({ ...form, command: e.target.value })}
               placeholder="command（必填）"
-              className="text-xs"
+              className="min-w-[10rem] flex-1 text-xs"
             />
             <Input
               value={form.args}
               onChange={(e) => setForm({ ...form, args: e.target.value })}
               placeholder="args（空格分隔）"
-              className="text-xs"
+              className="min-w-[10rem] flex-1 text-xs"
             />
             <Input
               value={form.cwd}
               onChange={(e) => setForm({ ...form, cwd: e.target.value })}
               placeholder="cwd（可选）"
-              className="text-xs"
+              className="min-w-[10rem] flex-1 text-xs"
             />
           </div>
         ) : (
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             <Input
               value={form.url}
               onChange={(e) => setForm({ ...form, url: e.target.value })}
               placeholder="url（必填）"
-              className="text-xs"
+              className="min-w-[12rem] flex-[2] text-xs"
             />
             <Input
               value={form.headerRows}
               onChange={(e) => setForm({ ...form, headerRows: e.target.value })}
               placeholder="headers（每行 K=V）"
-              className="text-xs"
+              className="min-w-[10rem] flex-1 text-xs"
             />
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-[11px] text-muted-foreground">
-            含 <code>!!js</code> 表达式或未知字段时请用原始 YAML 通道；
-            <code>failOnStartupError</code> 属危险字段，结构化通道不暴露（仅原始通道可表达）。
+        {/* 说明 + 提交：窄宽度下纵向堆叠，说明不被按钮挤成窄条 */}
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <p className="min-w-[14rem] flex-1 text-[11px] leading-relaxed text-muted-foreground">
+            含 <code className="dsh-code">!!js</code> 表达式或未知字段时请用原始 YAML
+            通道；<code className="dsh-code">failOnStartupError</code>{" "}
+            属危险字段，结构化通道不暴露（仅原始通道可表达）。
           </p>
           <Button
             variant="secondary"
             size="sm"
+            className="shrink-0"
             disabled={!writable || busy !== null}
             onClick={add}
           >
+            {busy === "add" && <Loader2 className="size-3 animate-spin" />}
             添加
           </Button>
         </div>
@@ -382,13 +406,14 @@ export default function McpPanel() {
           return (
             <div
               key={item.serverName}
-              className="rounded-md border border-border/60 p-2 space-y-1.5"
+              className="dsh-list-row space-y-1.5 p-2"
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
+              {/* 行头：窄宽度下控件组换行到名称下方 */}
+              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
+                <div className="min-w-0 flex-1">
                   <button
                     type="button"
-                    className="truncate text-left text-xs font-medium hover:underline"
+                    className="flex max-w-full items-center gap-1 truncate text-left text-xs font-medium hover:underline"
                     onClick={() =>
                       setExpanded((prev) => ({
                         ...prev,
@@ -396,8 +421,12 @@ export default function McpPanel() {
                       }))
                     }
                     title="展开详情"
+                    aria-expanded={isOpen}
                   >
-                    {item.serverName}
+                    <ChevronRight
+                      className={`size-3 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
+                    />
+                    <span className="truncate">{item.serverName}</span>
                   </button>
                   <div className="mt-1 flex flex-wrap items-center gap-1">
                     <Badge variant={stateVariant(item.state)}>
@@ -488,7 +517,7 @@ export default function McpPanel() {
           if (!open) setPendingRemove(null);
         }}
       >
-        <DialogContent className="max-w-sm">
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-md">
           <DialogHeader>
             <DialogTitle>
               {pendingRemove?.origin === "managed"
@@ -498,7 +527,7 @@ export default function McpPanel() {
             <DialogDescription>
               {pendingRemove?.origin === "managed" ? (
                 <>
-                  将从 <code>$DSH_HOME/cordis.patch.yml</code>{" "}
+                  将从 <code className="dsh-code">$DSH_HOME/cordis.patch.yml</code>{" "}
                   的受管 MCP 区块中删除该行的**声明与定向覆盖**，服务器随即从合成树消失。
                   dsh 会就地热重载，无需重启。
                 </>

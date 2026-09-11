@@ -583,7 +583,8 @@ fn backup_dir(package: &str) -> PathBuf {
 ///
 /// ADR-0006 D18 把这条路径登记为启动器白名单的**唯一例外**：除本函数外，
 /// `src-tauri/src/**` 中不存在任何写这三个 profile 文件的调用点。
-/// 该不变量由 `tests/plugin_whitelist_test.rs` 静态断言守护。
+/// 该不变量由 `tests/part_b_compliance_test.rs` 的静态断言守护（ADR-0009 D19 订正：
+/// 此前此处引用的是并不存在的 `tests/plugin_whitelist_test.rs`）。
 fn rollback_after_failed_official_op(
     profile_name: &str,
     backup: &std::path::Path,

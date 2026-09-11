@@ -56,7 +56,7 @@ const PANEL_ENTRIES: {
 }[] = [
   { key: "mcp", label: "MCP", title: "MCP server 管理", Icon: Plug },
   { key: "plugins", label: "插件", title: "插件管理", Icon: Puzzle },
-  { key: "skills", label: "技能", title: "技能共享", Icon: Sparkles },
+  { key: "skills", label: "技能", title: "技能管理", Icon: Sparkles },
   { key: "settings", label: "设置", title: "打开设置", Icon: SettingsIcon },
 ];
 
@@ -155,9 +155,16 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarOpen]);
 
-  // 进入移动端自动收起侧栏（drawer 默认收起）
+  // 进入移动端（≤640px）自动收起侧栏**与右栏**（两者在该档位都是全屏遮罩）。
+  //
+  // ADR-0009 D8：此前只收侧栏，而 `rightOpen` 初值为 true、且 ≤640px 的
+  // `.right-panel-container.right-panel-open` 是 `inset:0` 全屏 overlay（z-index 270）
+  // → 窄窗口首屏「日志面板全屏盖住主内容」，用户必须先点遮罩才能看到版本管理。
   useEffect(() => {
-    if (isMobile) setSidebarOpen(false);
+    if (isMobile) {
+      setSidebarOpen(false);
+      setRightOpen(false);
+    }
   }, [isMobile]);
 
   // 视口缩到紧凑档（641~959px）自动收起右栏（该档位不参与 split 布局）
@@ -222,10 +229,11 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
                         onClick={() => onOpenPanel(key)}
                         title={title}
                         aria-pressed={active}
-                        className="flex-1 px-1"
+                        className="min-w-0 flex-1 px-1"
                       >
                         <Icon className="size-3.5" />
-                        {label}
+                        {/* 标签：侧栏被拖窄时由容器查询自动隐藏（见 index.css .panel-entry-label） */}
+                        <span className="panel-entry-label truncate">{label}</span>
                       </Button>
                     );
                   })}
@@ -257,6 +265,8 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
             size="icon-sm"
             onClick={() => setSidebarOpen(!sidebarOpen)}
             title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-label={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-expanded={sidebarOpen}
             className="shrink-0"
           >
             {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
@@ -276,6 +286,8 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
               size="icon-sm"
               onClick={() => setRightOpen(!rightOpen)}
               title={rightOpen ? "收起日志" : "展开日志"}
+              aria-label={rightOpen ? "收起日志面板" : "展开日志面板"}
+              aria-expanded={rightOpen}
             >
               {rightOpen ? <X className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
             </Button>

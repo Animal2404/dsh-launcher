@@ -22,26 +22,34 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        # pin 到不可变 commit SHA（ADR-0009 D17）：tag 可被上游重指，SHA 不可。
+        # 升级方式：核对上游 release 后替换 SHA，并同步更新行尾注释。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: 安装 Node.js（22）
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
       - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
+        # 注意：本 action **由 @rev 推断工具链**（官方 README），pin 成 SHA 后必须显式
+        # 传 `toolchain:`，否则无法推断要装哪个工具链（ADR-0009 D17）。
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: 缓存 cargo（增量编译）
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
       - name: 安装前端依赖
         run: npm ci --include=dev
+
+      - name: 版本一致性门禁（五文件六落点，ADR-0009 D1/D2）
+        run: node scripts/check-version-sync.mjs
 
       - name: 类型检查（tsc）
         run: npx tsc --noEmit
@@ -58,11 +66,23 @@ jobs:
       - name: 单元测试（cargo test --lib）
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
-      - name: 集成测试（离线部分：配置默认值 / 托盘图标 / 并发 / 窗口图标 / 通道互斥 / PATH 注入）
+      - name: 集成测试（离线 hermetic 全量）
+        # ADR-0009 D11/D12 订正：
+        #   · 删除 channel_mutex_logic_test（只测测试内自定义函数，零生产覆盖），
+        #     由 github_channel_state_test 取代（直调生产 github_installed/github_clone_dir）；
+        #   · 补入此前被漏掉的 plugin_pipeline_test / mcp_pipeline_test（均离线可跑）；
+        #   · 补入 part_b_compliance_test（符号链接不可用时会**跳过**而非 panic，见 D12）；
+        #   · 补入 version_sync_test（五文件版本一致性防回归）。
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --test config_default_test
           cargo test --manifest-path src-tauri/Cargo.toml --test tray_icon_test
           cargo test --manifest-path src-tauri/Cargo.toml --test concurrency_test
           cargo test --manifest-path src-tauri/Cargo.toml --test icon_window_test
-          cargo test --manifest-path src-tauri/Cargo.toml --test channel_mutex_logic_test
           cargo test --manifest-path src-tauri/Cargo.toml --test path_inject_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test github_channel_state_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test version_sync_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test part_b_compliance_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test plugin_pipeline_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test mcp_pipeline_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test skill_write_pipeline_test
+          cargo test --manifest-path src-tauri/Cargo.toml --test skill_import_pipeline_test

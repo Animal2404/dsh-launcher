@@ -658,13 +658,14 @@ pub fn set_state(
             disabled: desired,
         }),
     }
-    // 不变量 #2：定向条目必须能指向某条声明（同层或更早层）——
-    // 受管声明与合成树既有行都算；两者都没有则拒绝写入（避免 dsh 每次启动告警）
-    if block.declare_by_row_id(&row_id).is_none() && row.row_id != row_id {
-        return Err(PluginError::illegal(format!(
-            "无法为行 {row_id} 写定向覆盖：受管区块无该声明"
-        )));
-    }
+    // 不变量 #2：定向条目必须能指向某条声明（同层或更早层）——受管声明与合成树既有行都算。
+    //
+    // 该不变量在此路径上**已由上游保证**，故不需要额外守卫（ADR-0009 D4，2026-09-12 清理）：
+    // `row` 来自 `find_in_tree(&tree, server_name)`，其 `None` 情形已由
+    // `state::validate_transition`（`core/mcp/state.rs`）以 `NotFound`(3) 拦下 ——
+    // 因此能走到这里的 `row` 必然存在于合成树，`row_id` 必然指向一条真实声明。
+    // 曾经的写法 `block.declare_by_row_id(&row_id).is_none() && row.row_id != row_id` 中，
+    // 右项是同一变量的自比较、**恒为 false**，使整个守卫恒不可达（死代码）。
 
     apply_with_verification(
         server_name,

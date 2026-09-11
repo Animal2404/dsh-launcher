@@ -111,8 +111,3 @@ pub fn progress(
         message: message.into(),
     }
 }
-
-/// 通过 AppHandle 推送进度事件（无 handle 时静默丢弃）
-pub fn emit(app: &tauri::AppHandle, payload: &ProgressPayload) {
-    let _ = app.emit(PROGRESS_EVENT, payload.clone());
-}

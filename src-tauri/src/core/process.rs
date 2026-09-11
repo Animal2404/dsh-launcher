@@ -821,8 +821,11 @@ fn open_redirect_file(path: &std::path::Path) -> std::io::Result<std::fs::File> 
 
 /// 处理一行 dsh 输出：
 /// - stdout 行捕获 token URL → 内存 web_url + 独立缓存文件；
-/// - v0.5.6（产品决策）：token 行**明文**写入日志/推送前端 —— 用户需从日志获取
-///   完整带 token 访问地址以在外部浏览器手动打开（裸 URL 会被 dsh 401 拒）。
+/// - **日志口径（ADR-0009 D5 定案，2026-09-12 复核确认）**：token 行**明文**写入日志并
+///   推送前端 —— 用户需从日志面板复制**完整带 token 地址**在外部浏览器手动打开
+///   （裸 URL 会被 dsh 以 401 "authentication required" 拒绝）。
+///   该口径由产品所有者明确裁定保留（沿 v0.5.6 决策），故 `core/logging.rs` 中曾在
+///   v0.4.13 引入的 `redact_web_token()` 打码函数已作为死代码删除，不再保留误导性实现。
 ///   安全权衡：日志仅本机用户可读（LOCALAPPDATA）；泄漏风险由产品所有者接受。
 fn process_dsh_output_line(
     line: &str,

@@ -21,7 +21,17 @@ export const RIGHT_PANEL_MAX_WIDTH = 1200;
 const COMPACT_CHAT_MIN_WIDTH = 320;
 const DESKTOP_CHAT_MIN_WIDTH = 420;
 
-/** 宽度 clamp：处理 NaN/Infinity，并保证 min ≤ max */
+/**
+ * 宽度 clamp：处理 NaN/Infinity，并保证 min ≤ max。
+ *
+ * 注（ADR-0009 D20，2026-09-12 复核后**保留原语义**）：曾怀疑
+ * `effectiveMax = Math.max(minWidth, maxWidth)` 在「可用上限 < 设计下限」时会放弃上限
+ * 而导致布局溢出，并试改为「上限优先」。但对**可达状态空间**（视口 641–1920 × 两栏
+ * open/closed × 宽度取默认/最小/最大，含不动点迭代与单次遍历两种顺序，共 138,240 组）
+ * 的穷举模拟显示：两侧 max 计算**互相约束**、系统总能收敛到不溢出的解，**未发现可达溢出**。
+ * 而「上限优先」会把侧栏压到 120（低于 SIDEBAR_MIN_WIDTH=200）、违反自身声明的最小宽，
+ * 属未经证实的行为变更，故回退。详见 ADR-0009 D20 的实测复核。
+ */
 export function clampPanelWidth(width: number, minWidth: number, maxWidth: number): number {
   const finiteWidth = Number.isFinite(width) ? width : minWidth;
   const effectiveMax = Math.max(minWidth, maxWidth);

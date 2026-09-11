@@ -311,7 +311,6 @@ pub fn run() {
             commands::dsh::get_web_url,
             commands::dsh::probe_web_ready,
             commands::dsh::create_desktop_shortcut,
-            commands::dsh::set_web_gui_icon,
             commands::dsh::create_web_gui_window,
             commands::dsh::start_dsh,
             commands::dsh::stop_dsh,
@@ -339,9 +338,21 @@ pub fn run() {
             commands::plugin::plugin_uninstall,
             commands::plugin::plugin_sync,
             commands::plugin::plugin_repair,
-            commands::skill::skill_status,
-            commands::skill::skill_apply,
-            commands::skill::skill_migrate,
+            // ADR-0007：技能管理（列出 / 启停 / 删除）。
+            // 旧共享命令 skill_status/skill_apply/skill_migrate 的前端入口已退役，
+            // Rust 后端保留在 core::skill::sharing 供 CLI 使用。
+            commands::skill::skill_list,
+            commands::skill::skill_set_enabled,
+            commands::skill::skill_delete,
+            // ADR-0008：技能导入 / 检查更新 / 来源注册表 / 外部打开
+            commands::skill::skill_import_url,
+            commands::skill::skill_import_batch,
+            commands::skill::skill_check_updates,
+            commands::skill::skill_apply_update,
+            commands::skill::skill_sources,
+            commands::skill::skill_forget_source,
+            commands::skill::skill_open,
+            commands::config::set_editor,
             commands::mcp::mcp_list,
             commands::mcp::mcp_add,
             commands::mcp::mcp_remove,

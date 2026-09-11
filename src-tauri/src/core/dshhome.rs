@@ -124,6 +124,14 @@ pub fn agents_home_agents_md() -> PathBuf {
     agents_home().join(AGENTS_MD_FILENAME)
 }
 
+/// 共享真源侧的词表文件：`<agentsHome>/CONTEXT.md`（ADR-0007）。
+///
+/// **dsh 不读此文件**（全仓无引用，见 `CONTEXT_MD_FILENAME` 的说明），它是 agent/技能
+/// 侧的约定资源。启动器提供「用默认程序编辑」入口，但不把它当作 dsh 的配置输入。
+pub fn agents_home_context_md() -> PathBuf {
+    agents_home().join(CONTEXT_MD_FILENAME)
+}
+
 /// `<dshHome>/profiles`。
 pub fn profiles_dir() -> PathBuf {
     dsh_home().join(PROFILES_DIR)

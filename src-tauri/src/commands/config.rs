@@ -38,6 +38,10 @@ pub struct ConfigView {
     pub auto_open_browser: bool,
     /// 启动后自动同步 upstream 插件
     pub auto_sync_plugins: bool,
+    /// 外部编辑器命令（空 = 用系统默认关联程序打开，见 ADR-0008）
+    pub editor_command: String,
+    /// 是否已问过「用哪个程序打开」（首次点击编辑时弹一次引导）
+    pub editor_prompt_seen: bool,
 }
 
 impl From<AppConfig> for ConfigView {
@@ -56,6 +60,8 @@ impl From<AppConfig> for ConfigView {
             auto_start_dsh: c.auto_start_dsh,
             auto_open_browser: c.auto_open_browser,
             auto_sync_plugins: c.auto_sync_plugins,
+            editor_command: c.editor_command,
+            editor_prompt_seen: c.editor_prompt_seen,
         }
     }
 }
@@ -160,5 +166,32 @@ pub fn set_switches(
     state.logger.info(&format!(
         "窗口与运行行为已保存（closeExits={close_exits}, minimizeToTray={minimize_to_tray}, keepDshOnExit={keep_dsh_on_exit}, keepDshHomeOnUninstall={keep_dsh_home_on_uninstall}, autoStartDsh={auto_start_dsh}, autoOpenBrowser={auto_open_browser}, autoSyncPlugins={auto_sync_plugins}）"
     ));
+    Ok(())
+}
+
+/// 保存外部编辑器配置（ADR-0008）
+///
+/// `editor_command` 为空 = 使用系统默认关联程序。
+/// `prompt_seen` 用于「首次点击编辑时弹一次引导」：引导完成后置 true，不再打扰。
+#[tauri::command]
+pub fn set_editor(
+    state: State<'_, crate::AppState>,
+    editor_command: String,
+    prompt_seen: bool,
+) -> Result<(), String> {
+    let trimmed = editor_command.trim().to_string();
+    let _guard = cfg_write_lock();
+    let mut cfg = AppConfig::load();
+    cfg.editor_command = trimmed.clone();
+    cfg.editor_prompt_seen = prompt_seen;
+    cfg.save()?;
+    let display = if trimmed.is_empty() {
+        "系统默认程序".to_string()
+    } else {
+        trimmed
+    };
+    state
+        .logger
+        .info(&format!("外部编辑器已设为 {display}"));
     Ok(())
 }

@@ -167,7 +167,7 @@ fn broken_link_is_detected_as_broken() {
     let view = home.view(ShareResource::AgentsMd);
     let canonical = home.canonical(ShareResource::AgentsMd);
     assert!(!canonical.exists(), "前提：真源不存在");
-    create_file_symlink(&canonical, &view);
+    if !create_file_symlink(&canonical, &view) { return; }
 
     let status = home.status_of(ShareResource::AgentsMd);
     assert_eq!(
@@ -191,7 +191,7 @@ fn link_repair_creates_resolvable_link_and_reports_linked() {
     // 先造一条**指向别处**的断链，验证"修复"路径
     let wrong = home.root.join("wrong-target.md");
     std::fs::write(&wrong, "wrong").unwrap();
-    create_file_symlink(&wrong, &view);
+    if !create_file_symlink(&wrong, &view) { return; }
     let before = home.status_of(ShareResource::AgentsMd);
     assert_eq!(before.state, ResourceState::Broken);
 
@@ -519,12 +519,16 @@ fn repair_links_cleans_launcher_broken_links_and_repairs_instruction_link() {
     // ② 启动器遗留的三条断链（全部指向已空的 `<agentsHome>/agent/*`）
     let legacy = home.agents_home.join("agent");
     std::fs::create_dir_all(&legacy).unwrap();
-    create_dir_link(&legacy.join("skills"), &home.view(ShareResource::Skills));
-    create_file_symlink(&legacy.join("AGENTS.md"), &home.view(ShareResource::AgentsMd));
-    create_file_symlink(
-        &legacy.join("CONTEXT.md"),
-        &home.view(ShareResource::ContextMd),
-    );
+    // 无符号链接特权时跳过本用例（ADR-0009 D12：不得 panic 使整个测试文件不可用）
+    let links_ready = create_dir_link(&legacy.join("skills"), &home.view(ShareResource::Skills))
+        && create_file_symlink(&legacy.join("AGENTS.md"), &home.view(ShareResource::AgentsMd))
+        && create_file_symlink(
+            &legacy.join("CONTEXT.md"),
+            &home.view(ShareResource::ContextMd),
+        );
+    if !links_ready {
+        return;
+    }
     // 前置断言：三条都是断链
     for resource in ShareResource::ALL {
         assert_eq!(
@@ -586,7 +590,7 @@ fn repair_links_keeps_user_created_links_outside_agents_home() {
     let elsewhere = home.root.join("my-own-vocab.md");
     std::fs::write(&elsewhere, "# 我的词表\n").unwrap();
     let view = home.view(ShareResource::ContextMd);
-    create_file_symlink(&elsewhere, &view);
+    if !create_file_symlink(&elsewhere, &view) { return; }
     assert_eq!(
         home.status_of(ShareResource::ContextMd).state,
         ResourceState::Broken
@@ -623,6 +627,47 @@ fn repair_links_never_touches_real_files() {
     assert_eq!(std::fs::read_to_string(&view).unwrap(), "# 用户手写\n");
 }
 
+// ==================== D12：符号链接失败必须"跳过"而非 panic ====================
+
+/// 验证 D12 的核心契约：符号链接创建失败时，helper 必须**返回 false**（调用方据此跳过用例），
+/// **绝不能 panic**（那会让整个测试文件在无开发者模式/无符号链接特权的 runner 上不可用）。
+///
+/// 用**确定性**手段制造失败：让 link 路径先被一个目录占用 → `symlink_file` 必然报
+/// AlreadyExists。因此本断言不依赖「本机是否有符号链接特权」，两种情况都成立。
+#[test]
+fn symlink_helper_失败时返回false而不panic() {
+    let home = Home::new("symlink-failure");
+    let target = home.root.join("target.txt");
+    std::fs::write(&target, "x").unwrap();
+
+    // 让 link 路径已存在（目录）→ 创建符号链接必然失败
+    let link = home.root.join("occupied");
+    std::fs::create_dir_all(&link).unwrap();
+
+    let created = create_file_symlink(&target, &link);
+    assert!(
+        !created,
+        "目标路径已被占用时，符号链接创建必须失败并返回 false（供调用方跳过）"
+    );
+}
+
+/// 同上：目录链接失败路径（`create_dir_link` 不得 panic）
+#[test]
+fn dir_link_helper_失败时返回false而不panic() {
+    let home = Home::new("dir-link-failure");
+    let target = home.root.join("target-dir");
+    std::fs::create_dir_all(&target).unwrap();
+
+    let link = home.root.join("occupied-dir");
+    std::fs::create_dir_all(&link).unwrap();
+
+    let created = create_dir_link(&target, &link);
+    assert!(
+        !created,
+        "目标路径已被占用时，目录链接创建必须失败并返回 false（供调用方跳过）"
+    );
+}
+
 // ==================== 扫描辅助 ====================
 
 /// 源码根目录：优先用 `CARGO_MANIFEST_DIR`，回退当前工作目录。
@@ -653,48 +698,81 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 创建文件符号链接（Windows 需开发者模式；失败时跳过该用例）
+/// 创建文件符号链接（Windows 需开发者模式/符号链接特权）
+///
+/// ADR-0009 D12：**失败即 panic 会让整个测试文件在无特权环境不可用**
+/// （GitHub `windows-latest` runner 默认未开启开发者模式）。
+/// 现改为返回 `bool`：调用方据此**跳过**该用例（并打印原因），
+/// 使「不依赖符号链接」的静态断言在无特权环境仍可运行。
 #[cfg(windows)]
-fn create_file_symlink(target: &Path, link: &Path) {
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
     if let Some(parent) = link.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(error) = std::os::windows::fs::symlink_file(target, link) {
-        panic!("创建符号链接失败（需开发者模式/符号链接特权）: {error}");
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "[skip] 创建符号链接失败（需开发者模式/符号链接特权），跳过该用例: {error}"
+            );
+            false
+        }
     }
 }
 
 #[cfg(not(windows))]
-fn create_file_symlink(target: &Path, link: &Path) {
+fn create_file_symlink(target: &Path, link: &Path) -> bool {
     if let Some(parent) = link.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::os::unix::fs::symlink(target, link).unwrap();
+    match std::os::unix::fs::symlink(target, link) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[skip] 创建符号链接失败，跳过该用例: {error}");
+            false
+        }
+    }
 }
 
 /// 创建目录链接（Windows 用 junction，免特权；复刻 `skill::create_dir_link`）
+///
+/// 同 D12：失败返回 `false` 由调用方跳过，不 panic。
 #[cfg(windows)]
-fn create_dir_link(target: &Path, link: &Path) {
+fn create_dir_link(target: &Path, link: &Path) -> bool {
     if let Some(parent) = link.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let output = std::process::Command::new("cmd")
+    match std::process::Command::new("cmd")
         .args(["/D", "/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
         .output()
-        .expect("执行 mklink 失败");
-    assert!(
-        output.status.success(),
-        "创建 junction 失败: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            eprintln!(
+                "[skip] 创建 junction 失败，跳过该用例: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("[skip] 执行 mklink 失败，跳过该用例: {error}");
+            false
+        }
+    }
 }
 
 #[cfg(not(windows))]
-fn create_dir_link(target: &Path, link: &Path) {
+fn create_dir_link(target: &Path, link: &Path) -> bool {
     if let Some(parent) = link.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::os::unix::fs::symlink(target, link).unwrap();
+    match std::os::unix::fs::symlink(target, link) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[skip] 创建目录链接失败，跳过该用例: {error}");
+            false
+        }
+    }
 }

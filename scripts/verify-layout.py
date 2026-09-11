@@ -51,7 +51,7 @@ with sync_playwright() as p:
     sb_box = page.locator(".sidebar-container").bounding_box()
     check("设置按钮位于侧栏底部区域", bool(sb_footer_box and sb_box) and sb_footer_box["y"] > sb_box["y"] + sb_box["height"] * 0.7, f"y={sb_footer_box['y'] if sb_footer_box else 0:.0f}")
 
-    # 4. Sidebar 展开/收起 → 收起后 Main 扩展 → 再展开恢复 260
+    # 4. Sidebar 展开/收起 → 收起后 Main 扩展 → 再展开恢复 340（与 SIDEBAR_DEFAULT_WIDTH 一致）
     sidebar_toggle = page.locator(".titlebar button").first
     sidebar_toggle.click()
     page.wait_for_timeout(450)
@@ -77,7 +77,7 @@ with sync_playwright() as p:
     rb_reopen = page.locator(".right-panel-container").bounding_box()
     check("日志再展开恢复 340", abs((rb_reopen["width"] if rb_reopen else 0) - 340) < 2, f"width={rb_reopen['width'] if rb_reopen else 0:.0f}")
 
-    # 6. Sidebar 拖拽 260->320
+    # 6. Sidebar 拖拽 340 -> 400（右移 60px，期望值见下方断言）
     sb_handle = page.locator(".sidebar-resize-handle")
     sbh = sb_handle.bounding_box()
     page.mouse.move(sbh["x"] + sbh["width"] / 2, 450)
@@ -88,7 +88,7 @@ with sync_playwright() as p:
     sb_after = page.locator(".sidebar-container").bounding_box()
     check("Sidebar 拖拽 340->400", abs((sb_after["width"] if sb_after else 0) - 400) < 4, f"width={sb['width']:.0f}->{sb_after['width'] if sb_after else 0:.0f}")
 
-    # 7. Right 拖拽 640->560
+    # 7. Right 拖拽 340 -> 280（右移 80px，触 RIGHT_PANEL_MIN_WIDTH）
     r_handle = page.locator(".right-panel-resize-handle")
     rbh = r_handle.bounding_box()
     page.mouse.move(rbh["x"] + rbh["width"] / 2, 450)
@@ -167,6 +167,41 @@ with sync_playwright() as p:
     overflow = page.evaluate("document.querySelector('.app-main') ? document.querySelector('.app-main').scrollWidth <= document.querySelector('.app-main').clientWidth + 1 : true")
     check("移动端 Main 占满", bool(mb_m) and abs(mb_m["width"] - 600) < 4, f"main={mb_m['width'] if mb_m else 0:.0f}")
     check("内容无横向溢出", overflow)
+
+    # 10b. 移动端右栏默认不该全屏遮挡主内容（ADR-0009 D8）
+    #
+    # 必须**新开一个移动端尺寸的页面**来测，不能复用上面「先大后小」改视口的页面：
+    # 从 800px 缩到 600px 会途经 641~959px 档位的 effect（它会把右栏关掉），
+    # 从而**掩盖**真正的缺陷路径 —— 「以窄窗口尺寸启动」时 rightOpen 初值为 true、
+    # 且 ≤640px 的 `.right-panel-container.right-panel-open` 是 `inset:0` 全屏 overlay
+    # （z-index 270）+ 遮罩打开，首屏日志面板盖住主内容。
+    mobile_page = browser.new_page(viewport={"width": 600, "height": 850})
+    mobile_page.goto(BASE, wait_until="networkidle")
+    mobile_page.wait_for_timeout(1000)
+    m_state = mobile_page.evaluate(
+        """() => {
+            const rp = document.querySelector('.right-panel-container');
+            const r = rp ? rp.getBoundingClientRect() : null;
+            return {
+              cls: rp ? rp.className : null,
+              w: r ? r.width : -1,
+              x: r ? r.x : -1,
+              backdropOpen: document.querySelector('.right-panel-overlay-backdrop.is-open') !== null,
+            };
+        }"""
+    )
+    right_covers = (m_state["w"] > 4) and (m_state["x"] < 600)
+    check(
+        "移动端首屏右栏不遮挡主内容（D8）",
+        not right_covers,
+        f"class={m_state['cls']} x={m_state['x']:.0f} w={m_state['w']:.0f} backdrop={m_state['backdropOpen']}",
+    )
+    check(
+        "移动端首屏右栏遮罩未打开（D8）",
+        not m_state["backdropOpen"],
+        f"backdropOpen={m_state['backdropOpen']}",
+    )
+    mobile_page.close()
 
     # 12. 无致命 JS 错误（忽略 Tauri API 缺失的 reject，各组件已 catch）
     fatal = [e for e in errors if "tauri" not in e and "invoke" not in e and "getCurrent" not in e]

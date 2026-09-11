@@ -1,5 +1,296 @@
 # Changelog
 
+## [0.9.0] - 2026-09-11
+
+> 本版为**技能导入、手动检查更新与外部打开（ADR-0008）**。硬边界：未修改
+> `deepseek-harness` 任何代码；**未引入新依赖**（系统默认打开复用既有 `windows` crate 的
+> `ShellExecuteW`）；**未新增 npm 依赖**；**未新增 Tauri capability 权限**（编辑打开走
+> Rust 命令 + 闭集枚举，前端无法传任意路径）。
+
+### 新增
+
+- **批量导入 github 仓库（ADR-0008 D1/D4）**：批量管理面板 —— 填写<strong>仓库名</strong>
+  （可选标签）+ <strong>仓库 URL</strong>，点「增加」追加到待导入列表，可一次添加多个
+  仓库，点「确定」批量导入（另有「预览」只读、「移除」单条、「清空」列表）。每条：
+  浅克隆 → **递归收集所有 `SKILL.md`** → 逐个校验（`name`/`description` 必需、`name`
+  满足官方 `^[a-z0-9]+(?:-[a-z0-9]+)*$`）→ **扁平化**到 `<agentsHome>/skills/<name>/`。
+  **单条失败不中断其余条目**，逐条返回结果。仓库名落进来源记录作展示标签。
+  - 官方发现规则**只认扫描根顶层一层**（README「nested `**/SKILL.md` deliberately
+    not discovered」），而真实技能仓库普遍分类嵌套（`skills/<分类>/<name>/SKILL.md`），
+    故「克隆即用」会得到零个技能 —— 必须由导入器压平。
+  - 目标目录名取 frontmatter 的 `name`，不取仓库目录名（本机 93 技能中 2 例目录名与
+    name 不符）。
+  - **整目录复制**（含兄弟资源文件与 `agents/` 子目录）—— 技能是目录，只复制 `SKILL.md`
+    会断引用。
+  - **文件级覆盖（Q29 A）**：上游有则覆盖、本地独有保留、上游删除不落地；应用前有
+    「预览清单」需二次确认。
+- **手动检查更新（ADR-0008 D5/D6）**：对来源注册表里的 URL 逐文件比内容，产出三类清单
+  （新增 / 覆盖更新 / 本地独有保留）。**无定时任务、永不自动写盘**，应用需逐个确认。
+- **来源注册表 `skill-sources.json`**（schemaVersion 1）：记录「哪个技能来自哪个 URL 的
+  哪个 commit」，供 UI 显示来源与检查更新。**不叫 `skills.json`**（该名已被退役的
+  ADR-0005 共享模块占用）。
+- **共享资源编辑入口**：面板新增 `AGENTS.md` / `CONTEXT.md` 编辑按钮 + 技能根目录按钮。
+  文件不存在时自动按模板创建。
+- **每条技能新增「打开」按钮**（补 v0.8.0 遗漏）：用外部编辑器 / 系统默认程序打开
+  `SKILL.md`。
+- **可配置外部编辑器**：`AppConfig.editor_command`（空 = 系统默认程序），自由文本、
+  引号感知切分，支持 `code --wait`；首次点击编辑弹一次性引导（选「系统默认」或
+  「指定编辑器」）。
+
+### 修复
+
+- **★ `cargo test --lib` 测试二进制无法加载（P0，`STATUS_ENTRYPOINT_NOT_FOUND`）**：
+  - **[问题定位]** 根因是 `Logger` 结构体直接持有 `tauri::AppHandle` 字段 —— 任何
+    `#[cfg(test)]` 代码构造 `Logger`（本版 `import.rs` 的测试首次这么做）就会把整个
+    `tao`/`wry` GUI DLL 栈（`user32`/`gdi32`/`comctl32`/`dwmapi`/`shcore`/`uxtheme`/
+    `ole32`/`oleaut32`）链入 unittest 二进制；而该二进制没有 side-by-side manifest，
+    加载到 v5 的 `comctl32.dll`，缺少 `SetWindowSubclass`/`TaskDialogIndirect` 等 v6
+    导出 → 进程启动即失败。
+  - **[关键日志证据]** PE 导入表对比：未改动 HEAD 的 lib 测试二进制只导入 13 个非 GUI
+    DLL；引入 `import.rs` 后多出 9 个 GUI DLL。独立 worktree 检出 HEAD → 139 项测试通过，
+    排除环境因素。
+  - **[解决方案设计]** 把 `Logger.emitter` 类型擦除为
+    `Box<dyn Fn(&LogEvent) + Send + Sync>`（`LogEvent = Line(LogLine) | Progress(ProgressPayload)`），
+    由 `set_emitter` 在启动时把 `app.emit(...)` 封装进闭包；测试二进制里 `set_emitter`
+    是死代码被链接器剥离，`tauri::AppHandle` 与 GUI 栈不再进入测试二进制。
+  - **回归**：`cargo test --lib` 从「进程无法加载」恢复为 **193 项全通过**。
+- **删除 dead code**：`core/events.rs` 的 `emit()`（进度事件推送唯一调用方已改为擦除后的
+  emitter，该函数不再被引用）。
+
+### 变更
+
+- **`core/github.rs`**：抽出 `git_clone_command`（任意仓库浅克隆，复用 git 可执行解析 +
+  Token 注入 + 镜像重写）与 `resolve_repo_url`（镜像**只对 `https://github.com/` 生效**）。
+- **`core/config.rs`**：新增 `editor_command` / `editor_prompt_seen`（结构体带
+  `#[serde(default)]`，旧 `config.json` 无需迁移）。
+- **`Cargo.toml`**：既有 `windows` crate 增加 `Win32_UI_Shell` feature（`ShellExecuteW`；
+  **非新依赖**，只是既有依赖的 feature 扩充）。
+- **`core/skill/` 拆出新模块**：`import.rs`（递归扁平化 + 文件级覆盖）、`source.rs`
+  （来源注册表）、`update.rs`（手动检查更新）、`editor.rs`（闭集目标 + 可配置编辑器 +
+  `ShellExecuteW`）。
+- **`docs/adr/0008-skill-import-update-and-open.md`**：记录 D1–D13（含 D10 类型擦除的
+  完整工程约束）。
+- **CI**：新增运行 `skill_import_pipeline_test`（hermetic 导入端到端）。
+
+### 全链路审计修复（ADR-0009）
+
+> 对 v0.9.0 基线执行的全链路只读静态审计（前端 / Rust / Tauri / 依赖 / 工程配置 / 测试 / 文档）
+> 所发现问题的修复。逐条决策、精确契约与验收证据见 `docs/adr/0009-audit-remediation-plan.md`。
+> 硬边界：**未修改 `deepseek-harness` 任何代码**；**未新增依赖**（并移除已成孤儿的 `tokio`
+> dev-dependency）；**未放宽任何 Tauri capability**。
+
+- **发版链路解阻（P1）**：`package-lock.json` 版本由 `0.7.1` 对齐到 `0.9.0` —— 该漂移会让
+  `scripts/bump-version.mjs` 的一致性保护直接 `exit(1)`，**阻断任何一次发布**。新增
+  `scripts/check-version-sync.mjs`（五文件六落点）接入 CI 与 Release 门禁，并新增
+  `tests/version_sync_test.rs` 作为**独立实现**的防回归（避免脚本自身写错时两侧同时放过）。
+- **安全（CSP）**：`tauri.conf.json` 的 `"csp": null`（完全禁用）改为最小策略，并单独配置
+  `devCsp`（Tauri 在 dev 下取 `devCsp`、为空则回退 `csp`，只配 `csp` 会让 `tauri dev` 被
+  Vite HMR 拦坏）。策略逐项按**实测取证**：`style-src` 必须含 `'unsafe-inline'`（产物存在
+  运行时注入 `<style>` 的代码，否则 toast 样式静默丢失）、`connect-src` 含
+  `ipc: http://ipc.localhost`、字体与图片走 `'self'` + `data:`、生产不需 `unsafe-eval`。
+  新增 `scripts/verify-csp.py` 用真实产物 + 真实配置在 Chromium 中断言**零 CSP 违规**。
+- **token 日志口径定案（D5）**：维持 v0.5.6 起的**明文**口径（产品决策：用户需从日志复制
+  完整带 token 地址在外部浏览器打开 —— 裸 URL 会被 dsh 以 401 拒绝）。删除自 v0.5.6 起已无
+  调用方的 `redact_web_token()` 及其单测，并把口径集中记录于 `core/logging.rs`；
+  同步订正本 CHANGELOG v0.4.13 条目中与实现相反的「日志打码」表述。
+- **前端（D7–D10、D18–D19）**：10 处 Tauri 事件订阅统一收敛到 `useTauriEvent` /
+  `useRefreshOnEvent`，消除 7 处「cleanup 早于 `listen()` resolve → 监听器永不释放」的竞态
+  及 `.then()` 缺 `.catch` 的未处理拒绝；移动端首屏不再被全屏日志面板遮挡（此前
+  `rightOpen` 初值为 true 且 ≤640px 下右栏是 `inset:0` overlay）；git **卸载**不再误报
+  「请在 UAC 弹窗确认后重新检测」（该路径实为 `-Wait` 同步）；日志文件快速切换加单调序号
+  守卫（消除「标题是 B、正文是 A」）；10 处纯图标按钮补 `aria-label`；清理死代码
+  （`setWebGuiIcon` 与对应 Rust 命令及其 IPC 注册、`AppConfig.githubToken`、`cn-toast`、
+  重复 CSS 规则、`"use client"` 遗留指令）。
+- **测试体系（D11–D13）**：4 个「只测测试文件内自行复刻的逻辑、零生产覆盖」的假测试改为
+  **直调生产函数** —— 新增 `github_channel_state_test`（取代只测私有 `cleanup_dir` 的旧文件）、
+  重写 `path_inject_test`（原用例构造 `Command` 后从不执行）与 `concurrency_test`
+  （原测 tokio 运行时行为、且含 flaky 挂钟阈值），从 `commands/dsh.rs` 抽取生产纯函数
+  `rgba_to_bgra_and_mask` 并补 6 项单测；`part_b_compliance_test` 的符号链接失败改为
+  **跳过**而非 panic（否则整个文件在无开发者模式的 CI runner 不可用），并补 2 项失败路径
+  契约测试；CI 集成清单由 8 个文件扩为 **12 个**（补入此前遗漏的 `plugin_pipeline_test`、
+  `mcp_pipeline_test`、`part_b_compliance_test`、`version_sync_test`）；新增 `nightly.yml`
+  以 `--ignored` 覆盖 3 个真实网络/环境集成测试（此前从未被任何流水线执行）。
+- **文档（D14/D15）**：**重建** `docs/adr/0006-mcp-server-management.md` —— 该文件此前缺失，
+  却已被全仓 **19 处**按 `§章节` / `D编号` 引用（MCP 的架构决策无从追溯）；重写
+  `docs/DESIGN.md` 的模块划分对齐 `src-tauri/src/` 实际结构（此前列出的 `core/install.rs`、
+  `core/mirror.rs`、`core/backup.rs` 等**并不存在**，且未收录 `plugin/`、`mcp/`、`skill/` 三棵
+  子树）；`ADR-0004` 的版本同步「三处」订正为**五处**。
+- **供应链与脚本（D16/D17）**：CI / Release / Nightly 的**全部** action 由移动标签
+  （`@v4`、`@v2`、`@v0`、`@stable`）pin 到 **40 位 commit SHA**（SHA 经 `git ls-remote` 与
+  GitHub API 双源核验），其中 `dtolnay/rust-toolchain` 由分支引用改为 `master` SHA 并
+  **显式传 `toolchain: stable`**（该 action 由 `@rev` 推断工具链，pin 后必须显式指定）；
+  `scripts/e2e-adr0006.ps1` 的三处本机绝对路径改为参数化入参 + 存在性校验，
+  并移除「按启动时间扫射 `node` 进程」的误杀风险（改为对本脚本 PID 执行 `taskkill /T`）。
+
+### 验证
+
+- `cargo test --lib` **198 项全通过**（v0.8.0 的 168 项 → v0.9.0 新增 import/source/update/
+  editor 单测，审计修复再补图标像素转换 6 项与死代码清理）。
+- 集成测试 **12 个文件 / 63 项全通过**：`config_default`(2) · `tray_icon`(2) ·
+  `concurrency`(7) · `icon_window`(1) · `path_inject`(5) · `github_channel_state`(2) ·
+  `version_sync`(1) · `part_b_compliance`(17) · `plugin_pipeline`(5) · `mcp_pipeline`(16) ·
+  `skill_write_pipeline`(1) · `skill_import_pipeline`(4)。
+- `tsc --noEmit` / `tsc -p tsconfig.node.json --noEmit` / `vite build` /
+  `cargo check --all-targets`（**零警告**）/ `cargo build --release` 全部通过。
+- 端到端与专项门禁：`scripts/check-version-sync.mjs`（版本一致）、
+  `scripts/verify-layout.py`（33 项布局断言）、`scripts/verify-csp.py`（8 项 CSP 断言）、
+  `scripts/e2e-adr0006.ps1`（真实 dsh + 隔离 DSH_HOME，需显式提供路径参数）。
+
+
+### 已知边界（诚实声明）
+
+- **覆盖式导入会覆盖用户已改的技能内容**（文件级，本地独有保留但不做内容 diff 合并），
+  且**导入/更新整目录覆盖当前不逐文件备份**（ADR-0007 的备份只在启停写盘路径）。UI
+  文案已提示，应用前有预览清单需确认。
+- 检查更新每次都浅克隆，多来源/大仓库较慢（180s 超时上限）。
+- `skills.json`（已退役）与 `skill-sources.json`（新）两个文件并存，名字相近易混淆，
+  已在前者退役、文档与代码注释反复标注。
+
+## [0.8.0] - 2026-09-11
+
+> 本版为**技能管理（ADR-0007）**：对用户级技能根提供技能列出、启用/停用、可恢复删除
+> 与定位。硬边界：未修改 `deepseek-harness` 任何代码；**未引入新依赖**（Rust 侧无 YAML
+> 库）；**未新增 Tauri 权限**（定位复用已授予的 `opener:default`）；未新增 npm 依赖。
+
+### 新增
+
+- **技能管理面板（ADR-0007）**：底栏「技能」入口由「技能共享」改为「技能管理」，
+  不再分 Tab。列出官方两个**用户级**技能根 —— `<DSH_HOME>/skills`（官方 rank 400，
+  跳过 `.system`）与 `<agentsHome>/skills`（官方 rank 500），共 6 个官方扫描根中的
+  这 2 个。
+- **单一滑动开关**：写技能文件 frontmatter 的 `disable-model-invocation`
+  （官方契约：**缺省即允许**，仅显式 `true` 关闭模型面 → 「启用」= 删键、「停用」= 写
+  `true`）。因此从未动过的技能**字节零变化**。面板明写「停用后仍可用 `/技能名` 手动调用」，
+  因为官方语义里停用只关闭「模型面」，用户面仍开放。
+- **可恢复删除**：移入所属根的 `.trash/<名称>-<时间戳>/`，不真正删除；**符号链接技能
+  硬拒绝**（移动链接会把链接目标移走），前端同时隐藏该按钮。
+- **rank 生效标注**：复刻官方 rank 常量（100/200/300/400/500/600，**不自创优先级**），
+  同名技能中 rank 大者生效；被覆盖者**仍列出**但默认折叠并提示「停用它对模型无影响」。
+- **定位按钮**：在资源管理器中定位技能文件（复用 `opener:default` 已允许的
+  `reveal_item_in_dir`）。
+- **搜索**：按技能名称或描述过滤。
+- **`<agentsHome>/CONTEXT.md` 路径 helper**（`dshhome::agents_home_context_md`），为
+  v0.9.0 的编辑入口预留。
+
+### 修复
+
+- **`disable-model-invocation` 语义正确性（P0，写入器实现缺陷）**：初始实现把「启用」
+  写成 `disable-model-invocation: false` 而非**删键**，导致「停用 → 启用」无法逐字节回到
+  原状。由单测 `启用为_true_删键且可逆回到原字节` 捕获并修复；现「启用」严格删除该行
+  （只删该行自身的行尾符，绝不多删后续空行）。
+- **前后端类型漂移（3 处，历史遗留）**：TS `ResourceState` 缺少 Rust 已有的 `"native"`
+  变体（导致本机正常的「原生覆盖」状态被 UI 误显为「未建立」）、`ResourceStatus` 缺
+  `needsLink`、`SkillStatus` 缺 `agentsSkillsRoot`。本版随共享 UI 一并退役，改由新的
+  技能管理类型面取代。
+
+### 变更
+
+- **ADR-0005 的技能共享前端入口退役**：移除 `skillStatus`/`skillApply`/`skillMigrate`
+  三个 IPC 命令与其前端封装、以及整个共享（link/config/迁移）交互界面。**Rust 后端保留**
+  （`core::skill::sharing`）供 CLI `skill status|apply|migrate|repair-links` 使用，作为
+  应急路径 —— 技能走官方 rank 500 原生覆盖，本不需要链接。
+- **`core/skill.rs` 拆分为 `core/skill/` 模块**：`frontmatter.rs`（纯函数逐行外科手术）、
+  `scan.rs`（只读扫描 + rank 标注）、`manage.rs`（身份校验/备份/原子写/复验/回滚）、
+  `sharing.rs`（原共享模块，原样保留）。
+- **恢复 `docs/adr/`**：`docs/DESIGN.md` 与 ADR-0001…0005 在 v0.7.0（`02ebf6a`）被整体
+  删除，本版从 git 历史取回重建；新增 **`docs/adr/0007-skill-management.md`**。
+- **`CONTEXT.md` 词汇表**：新增「技能管理（ADR-0007）」节（技能根 / 模型可调用 /
+  用户可调用 / 停用 / 技能启用状态 / 生效与被同名覆盖 / 技能来源 / 导入 / 来源记录），
+  并把原「技能共享」标记为退役。
+- **CI**：新增运行 `skill_write_pipeline_test`（hermetic 端到端写操作测试）。
+
+### 安全与正确性设计（写入器）
+
+技能内容此前**从未**被本产品写入过 —— 这是首次引入「改写用户 markdown」的写操作类别
+（ADR-0007 D2），故护栏是本版的核心交付：
+
+- **逐行外科手术**：只改目标键那一行，其余字节**逐字节保留**（CRLF、BOM 缺失状态、
+  无末尾换行、块标量 `>-`/`>`、纯多行标量、嵌套 `metadata:`、行内注释、非 ASCII）。
+- **插入点固定为闭合 `---` 之前、第 0 列**：真实数据存在块标量与纯多行标量，插在
+  `description:` 之后会落进标量体并静默改变语义。
+- **歧义一律拒绝**（零猜测、零规范化）：无 frontmatter / 未闭合 / 键重复 / 值非裸
+  `true`/`false`（`yes`、`"true"`、`1` 等）全部拒绝并给出具名原因；只写官方规范
+  kebab-case 键（写 `disableModelInvocation` 会让官方**丢弃整个技能**）。
+- **身份键 = 绝对路径**：写前重扫受管根，要求「路径仍在受管根内 ∧ 磁盘 frontmatter 的
+  `name` 与面板声明一致」，不符即拒绝并提示刷新（防「面板打开后技能被改名，开关误伤
+  同名技能」）；拒绝发生在读取目标文件之前。
+- **备份 + 复验 + 回滚**：写前备份原字节到
+  `%LOCALAPPDATA%\dsh-launcher\backups\skills\<名称>\<时间戳>\`；写后复验
+  （frontmatter 仍可解析 ∧ `name`/`description` 仍在 ∧ 目标键取值符合预期），失败即用
+  备份回滚。
+- **幂等**：已达目标状态时**不写盘、不备份、不广播事件**。
+
+### 验证
+
+- `cargo test --lib` **168 项全通过**（其中技能相关 34 项，本版新增 29 项覆盖外科手术
+  边界：CRLF 保留、块标量/纯多行标量后插入、嵌套映射同名键不误判、删键不多删空行、
+  无末尾换行、幂等、可逆、非裸布尔与重复键拒绝、技能名官方字符集校验）。
+- 新增 hermetic 集成测试 `skill_write_pipeline_test`（端到端 10 步：双根扫描 / rank 覆盖
+  标注 / 停用写盘与备份字节一致 / 幂等 / 启用逐字节还原 / name 不符拒绝 / 根外路径拒绝 /
+  非裸布尔拒绝 / 删除入回收站 / 回收站不被识别为技能 / 平铺 `.md` 技能可启停）。
+- **真实数据回归**：对本机 `~/.agents/skills` 全部 **93 个真实技能**执行「停用 → 启用」
+  往返，断言**逐字节回到原状** —— 结果 **93 个检查、0 个被拒绝、0 个字节差异**，
+  其中 14 个已停用技能走幂等路径。CRLF 计数不变。
+- `tsc --noEmit` / `tsc -p tsconfig.node.json --noEmit` / `vite build` /
+  `cargo check --all-targets`（**零警告**）全部通过。
+
+### 已知边界（诚实声明）
+
+- 官方**不存在**任何脚本化手段可列举「当前生效的技能」：无技能 CLI、`--dump-config`
+  不枚举技能也不暴露技能根、`skills/list` Remote 只读且仅 4 字段（无路径）。故脚本化
+  证据止于「重新读取目标键」；**技能是否真的从模型可见目录消失需在 dsh GUI 中人工确认**
+  （沿用 ADR-0006 D12 对 MCP 的同一处理方式）。
+- **项目级技能不可管理**：项目根取决于 dsh **会话的工作区**（不是进程 CWD），启动器
+  不可知；custom 根由 preset 声明且不出现于合成配置（官方刻意禁用 host 行，由各 preset
+  挂载）。二者按 ADR-0007 D5 排除，面板不显示它们。
+- `.trash` 无自动清理策略（面板显示残留计数）。
+
+## [0.7.1] - 2026-09-10
+
+> 本版为**弹窗宽度缺陷修复 + 前端设计/外观/排版全链路统一**。硬边界：未修改
+> `deepseek-harness` 任何代码；未引入新依赖；纯前端（样式/布局/动效）与版本同步。
+
+### 修复
+
+- **弹窗宽度失效（P0）**：v0.7.0 的 MCP / 插件 / 技能 / 设置四个弹窗在 ≥640px 视口下
+  **实际渲染宽度恒为 384px**，调用方声明的 `max-w-2xl` / `max-w-xl` / `max-w-lg` 全部是死代码。
+  - **根因**：`src/components/ui/dialog.tsx` 的 `DialogContent` 基线类含 `sm:max-w-sm`；
+    它与调用方的 `max-w-*` 特异性相同，而 Tailwind v4 把 `sm:` 媒体查询变体输出在
+    **基础工具类之后**（构建产物中 `.sm\:max-w-sm` 位于 `.max-w-2xl` 之后），故恒定覆盖。
+  - **证据**：真实浏览器实测四者 `getBoundingClientRect().width` 均为 384px、
+    `computed max-width` 均为 `--container-sm`(24rem)，与声明的工具类不符。
+  - **修复**：`DialogContent` 不再声明任何宽度（消除级联歧义），宽度交还调用方；
+    四个管理面板统一为 **768px（48rem）＝修复前实测 384px 的两倍**，并以
+    `w-[calc(100vw-2rem)]` 保证任意窗口尺寸下自动收缩、永不溢出。
+- **原生控件外观脱离设计体系**：面板内的 `<select>` / `<textarea>` / `<input type=checkbox>`
+  原为浏览器默认样式（方角、灰边、无焦点环），现统一为圆角 + 主题边框 + 焦点环
+  （`.dsh-select` / `.dsh-textarea` / `.dsh-checkbox`），下拉展开项强制主题底色，
+  消除深色主题下的白底闪烁。
+
+### 新增
+
+- **弹窗版式重构**：`DialogHeader` 改为 **sticky 常驻**（长列表滚动时标题与说明可见），
+  新增 `DialogBody` 作为**唯一独立滚动区**，长内容不再把弹窗撑出视口。
+- **统一动效令牌**：`--motion-fast/base/slow` + `--ease-standard/entrance` 集中定义，
+  遮罩/弹窗/展开箭头/进度条/hover 全站共用一套时长与缓动；列表展开箭头增加 90° 旋转反馈，
+  日志文件视图切换增加一次性淡入。
+- **无障碍降级**：`prefers-reduced-motion: reduce` 下全部位移/缩放动效降为瞬时，
+  仅保留 `animate-spin` 加载指示（避免被误判为卡死）。
+- **容器查询自适应**：侧栏被拖窄至 <240px 时，底部四个管理入口自动收起为纯图标
+  （`@container` + `.panel-entry-label`），不再挤压换行。
+
+### 变更
+
+- **全链路响应式加固**：四个管理面板与工具链/状态/版本面板的**工具条、表单行、列表行**
+  全面 `flex-wrap` 化（窄宽度自动换行而非溢出），McpPanel 表单输入
+  `flex-1 + min-w-*`、SettingsPanel 开关栅格 `grid-cols-1 sm:grid-cols-2`、
+  SkillsPanel 下拉框 `w-full sm:w-40`。
+- **交互状态细化**：面板列表行统一 `.dsh-list-row`（hover 提亮 + 描边过渡），
+  SettingsPanel 开关行增加 hover 底色反馈；异步按钮补 `Loader2` 旋转态与
+  「处理中…」文案（MCP 刷新/添加、插件同步/安装、技能应用/迁移、版本安装）。
+- **图标语义统一**：弹窗标题栏图标与侧栏四个入口一一对应（Plug/Puzzle/Sparkles/Settings），
+  每个弹窗补充一句功能说明（`DialogDescription`）。
+
 ## [0.7.0] - 2026-09-10
 
 > 本版为 **ADR-0006（三类能力的官方合规收敛）** 施工结果，分两部分：**Part A** 新增 MCP Server
@@ -303,7 +594,7 @@
 - **全链路审计修复（依据 AUDIT_REPORT §2–§5）**：
   - **进程安全**：收养/停止/端口清剿前校验监听进程确为 dsh（命令行特征），不再强杀占用同端口的无关进程。
   - **假功能修复**：npm registry 镜像真正生效（npm view / npm install -g / pnpm install 注入 --registry）；GitHub tag 列表改 semver 数值排序（0.9<0.10、rc.9<rc.10）；工具链检测产出 `mismatch`（Node 22.19+/24+、Git 2.26+、Python 3.10+ 门槛比较）。
-  - **凭据安全**：GitHub Token 落盘 DPAPI 加密（Windows）、不再回传前端明文、git 认证改环境变量注入（不进命令行）；dsh web token 不再明文进日志/日志流（日志打码 + 独立缓存文件）。
+  - **凭据安全**：GitHub Token 落盘 DPAPI 加密（Windows）、不再回传前端明文、git 认证改环境变量注入（不进命令行）；dsh web token 的日志口径见 v0.5.6（**明文**，产品决策；本条早期表述"日志打码"已被 v0.5.6 取代，ADR-0009 D5 于 0.9.0 复核确认保留明文，并删除已成死代码的 `redact_web_token`）。
   - **可靠性**：子进程/网络操作全部加超时与强杀（查询/下载/安装/UAC 分档 60s~20min，流式命令 30min 看门狗）；配置读写加互斥与原子写；Logger/托盘构建失败降级不再 panic；新增后端每 5s 状态对账（收养实例退出收敛/外部启动自动接管）；monitor 收尾按 pid 归属复位，防覆盖重启新实例。
   - **前端**：面板宽度与对侧开关联动重算（reclamp 接线）；日志流增量格式化消除 O(n²)；贴顶滚动不再打断阅读；进度清理定时器登记、打开流程取消令牌下渗；版本平局比较按 semver 数值化（rc.9<rc.10）；开关/token 表单陈旧闭包与明文回显修正。
   - **构建/CI/发布**：`tsc -p tsconfig.node.json --noEmit` 纳入（vite.config.ts 首获类型检查，补 @types/node）；cargo check --all-targets；补离线集成测试，网络测试 `#[ignore]`；release 流程 bump 后显式打 tag、决策前同步远端 master、skip-release 不再自动递增；构建期依赖归入 devDependencies；清理死代码/重复实现与注释/文档漂移（AGENTS.md 悬空引用等）。

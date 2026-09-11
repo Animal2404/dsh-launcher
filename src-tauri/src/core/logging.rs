@@ -10,7 +10,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::Emitter;
 
 use crate::core::events::{self, InstallPhase};
 
@@ -88,10 +87,32 @@ impl LogLevel {
 }
 
 /// 全局日志写入器（线程安全）
+///
+/// **为何 emitter 用类型擦除**（`Box<dyn Fn(&LogEvent)>` 而非直接持有
+/// `tauri::AppHandle`）：`tauri::AppHandle` 把整个 `tao`/`wry` GUI DLL 栈
+/// （user32/gdi32/comctl32/dwmapi/shcore/uxtheme/ole32…）带进**库的符号表**。
+/// 结果：`cargo test --lib` 的 unittest 二进制一旦有测试代码构造 `Logger`
+/// （如 `core/skill/import` 的测试），就被链成一个 GUI 程序 —— 它没有
+/// side-by-side manifest，加载到 v5 的 comctl32.dll，缺少 `SetWindowSubclass` /
+/// `TaskDialogIndirect` 等 v6 导出 → `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`，
+/// 测试二进制根本无法启动。
+///
+/// 类型擦除后 `Logger` 的字段不再引用任何 tauri 类型；`set_emitter`（捕获
+/// AppHandle 的闭包）只在启动时调用一次，测试二进制里它是不可达的死代码，
+/// 因而被链接器剥离，GUI 栈不会被带进测试二进制。
 pub struct Logger {
     inner: Mutex<LoggerInner>,
-    /// Tauri AppHandle（用于向前端推送日志流；None 表示尚未关联）
-    emitter: Mutex<Option<tauri::AppHandle>>,
+    /// 类型擦除的事件发射器（None 表示尚未关联 AppHandle）
+    emitter: Mutex<Option<Box<dyn Fn(&LogEvent) + Send + Sync>>>,
+}
+
+/// 类型擦除后需要转发给前端的事件（日志行 / 安装进度）
+#[derive(Debug, Clone)]
+pub enum LogEvent {
+    /// 一条日志行
+    Line(LogLine),
+    /// 一条安装进度
+    Progress(events::ProgressPayload),
 }
 
 /// 日志文件状态
@@ -138,10 +159,22 @@ impl Logger {
         logger
     }
 
-    /// 关联 Tauri AppHandle（启动时调用一次）
+    /// 关联 Tauri AppHandle（启动时调用一次）。
+    ///
+    /// 把具体的事件推送封装进一个类型擦除的闭包，此后 `Logger` 自身不再引用
+    /// `tauri::AppHandle`（见 `Logger` 结构体上的注释）。
     pub fn set_emitter(&self, app: tauri::AppHandle) {
+        use tauri::Emitter;
+        let emitter: Box<dyn Fn(&LogEvent) + Send + Sync> = Box::new(move |event| match event {
+            LogEvent::Line(line) => {
+                let _ = app.emit(LOG_EVENT, line);
+            }
+            LogEvent::Progress(payload) => {
+                let _ = app.emit(crate::core::events::PROGRESS_EVENT, payload);
+            }
+        });
         if let Ok(mut e) = self.emitter.lock() {
-            *e = Some(app);
+            *e = Some(emitter);
         }
     }
 
@@ -188,8 +221,10 @@ impl Logger {
             }
             // v0.4.15（审计修复）：打开时显式共享"删除"——tail（只读）句柄与 rotate 的
             // rename 同进程并发时，若无 FILE_SHARE_DELETE，rename 会 ERROR_SHARING_VIOLATION
-            // → 10MB 切割静默失败、日志无限增长。日志文件本身不涉密（token 已打码），
+            // → 10MB 切割静默失败、日志无限增长。日志位于本机用户私有目录（LOCALAPPDATA），
             // 共享删除无安全副作用。
+            // 注（ADR-0009 D5 定案）：日志正文按产品决策**保留明文** token（见本文件
+            // 「dsh web token 的日志口径」一节），此处注释不再声称"已打码"。
             let mut opts = OpenOptions::new();
             opts.create(true).append(true);
             apply_share_mode(&mut opts);
@@ -207,16 +242,13 @@ impl Logger {
     /// 推送到前端一条日志行（内部使用，写入文件后调用）
     fn emit_line(&self, timestamp: String, source: LogSource, level: LogLevel, msg: &str) {
         if let Ok(emitter) = self.emitter.lock() {
-            if let Some(app) = emitter.as_ref() {
-                let _ = app.emit(
-                    LOG_EVENT,
-                    LogLine {
-                        timestamp,
-                        source: source.as_str(),
-                        level: level.as_str(),
-                        message: msg.to_string(),
-                    },
-                );
+            if let Some(emit) = emitter.as_ref() {
+                emit(&LogEvent::Line(LogLine {
+                    timestamp,
+                    source: source.as_str(),
+                    level: level.as_str(),
+                    message: msg.to_string(),
+                }));
             }
         }
     }
@@ -231,8 +263,8 @@ impl Logger {
     ) {
         let payload = events::progress(channel, phase, percent, message);
         if let Ok(emitter) = self.emitter.lock() {
-            if let Some(app) = emitter.as_ref() {
-                events::emit(app, &payload);
+            if let Some(emit) = emitter.as_ref() {
+                emit(&LogEvent::Progress(payload));
             }
         }
     }
@@ -394,30 +426,25 @@ pub fn clear_latest_web_url() {
     let _ = fs::remove_file(web_url_cache_file());
 }
 
-/// 将文本中的 `token=<值>` 打码为 `token=***`（值取到空白/`&`/`\r` 为止），
-/// 保留其余内容原样返回。供日志落盘与前端推送前调用（审计修复 2.5）。
-pub fn redact_web_token(line: &str) -> String {
-    const TOKEN_PREFIX: &str = "token=";
-    const MASK: &str = "token=***";
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(idx) = rest.find(TOKEN_PREFIX) {
-        out.push_str(&rest[..idx]);
-        out.push_str(MASK);
-        let after = &rest[idx + TOKEN_PREFIX.len()..];
-        let end = after
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '\r')
-            .unwrap_or(after.len());
-        rest = &after[end..];
-    }
-    out.push_str(rest);
-    out
-}
+// ==================== dsh web token 的日志口径（ADR-0009 D5，2026-09-12 定案）====================
+//
+// **决策：日志与前端日志流中的 dsh web 访问地址（含 token）保持明文，不打码。**
+//
+// 依据（CHANGELOG v0.5.6「dsh web 访问地址明文写入日志与前端日志流」）：
+// 用户需从日志面板复制**完整带 token 的地址**在外部浏览器手动打开 —— 裸 URL 会被 dsh
+// 以 401 "authentication required" 拒绝。安全权衡由产品所有者明确接受：日志仅本机用户
+// 可读写（LOCALAPPDATA），且 dsh 自身的 stdout 落盘文件本就不打码。
+//
+// 历史沿革：v0.4.13 曾引入 `redact_web_token()` 对 `token=` 打码；v0.5.6 改回明文后
+// 该函数与单测成为**死代码**（生产路径从不调用），且留下与实现矛盾的注释。ADR-0009 D5
+// 经产品所有者裁定「不打码」后，删除该死函数与其单测，并把口径统一记录于此。
+//
+// 注：`save_latest_web_url` / `extract_latest_web_url` 维护的独立缓存文件
+// （`last-web-url`）同样存明文完整 URL，供应用内部恢复访问地址使用。
 
 /// 从最新日志文件中提取最近一次 dsh web 启动的完整 URL（含 token）。
 /// 兜底方案：内存捕获失败时（如重启后）从**独立缓存文件**恢复；
-/// v0.4.13 起日志正文已对 token 打码，不再从轮转日志全文扫描明文令牌，
-/// 仅保留对历史（未打码）日志的兼容扫描作为最后手段。
+/// 并扫描当天日志正文中的 URL 作为最后手段（日志为明文口径，见上方决策说明）。
 pub fn extract_latest_web_url() -> Option<String> {
     // 首选：独立缓存文件（本版本及以后写入的唯一明文源）
     if let Ok(content) = fs::read_to_string(web_url_cache_file()) {
@@ -560,37 +587,6 @@ mod tests {
         assert_eq!(fs::read_to_string(path.with_extension("log.1")).unwrap(), "hello");
         assert!(!path.exists());
         let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_redact_web_token() {
-        use super::redact_web_token;
-        // 真实 dsh 启动行：token 值应被打码
-        let line = "dsh web: http://127.0.0.1:3080/?token=abc123def456";
-        assert_eq!(
-            redact_web_token(line),
-            "dsh web: http://127.0.0.1:3080/?token=***"
-        );
-        // 值后带 & 参数：只打码 token 值，保留其余
-        assert_eq!(
-            redact_web_token("http://127.0.0.1:1/?token=sec&mode=x"),
-            "http://127.0.0.1:1/?token=***&mode=x"
-        );
-        // 带空格后续文字
-        assert_eq!(
-            redact_web_token("http://127.0.0.1:3080/?token=abc next"),
-            "http://127.0.0.1:3080/?token=*** next"
-        );
-        // 无关行原样返回
-        assert_eq!(redact_web_token("hello world"), "hello world");
-        assert_eq!(redact_web_token("token 无等号"), "token 无等号");
-        // 多个 token 均打码
-        assert_eq!(
-            redact_web_token("a=1&token=x&b=2 token=y"),
-            "a=1&token=***&b=2 token=***"
-        );
-        // 空输入
-        assert_eq!(redact_web_token(""), "");
     }
 
     #[test]
