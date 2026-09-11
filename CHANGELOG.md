@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1] - 2026-09-11
+
+### 变更
+
+- merge: 同步上游 v0.9.0（MCP server 管理 / 技能管理与导入 / 全链路审计修复）并移除 Token 统计面板
+- 冲突解决：版本号类文件（package.json / package-lock.json / Cargo.toml / Cargo.lock / tauri.conf.json）与 src-tauri/src/lib.rs 一律取上游；CHANGELOG 以上游全量为底、把本 fork 的 0.6.1/0.6.2 条目按时间序插回 0.6.0 之后。
+- 移除 Token 统计（TokenTracker 集成，fork v0.6.x 遗留）：删除 core/tokentracker.rs、commands/tokentracker.rs、components/TokenPanel.tsx；去掉 commands/mod.rs、core/mod.rs、AppShell.tsx、src/lib/tauri.ts、README.md 的接线；capabilities/dsh-web-gui.json 回退到上游。
+- 保留本 fork 的有意改动：dsh.rs 的 disable_drag_drop_handler()（Windows 上 HTML5 拖放前提）、process.rs 的 Starting→Running 对账兜底、README 构建提示；新增 LOCAL-CHANGES.md 固化清单与自检命令。
+- 验证：npx tsc --noEmit 通过、vite build 通过；相对上游差异仅 5 个文件。
+
 ## [0.9.0] - 2026-09-11
 
 > 本版为**技能导入、手动检查更新与外部打开（ADR-0008）**。硬边界：未修改
