@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2] - 2026-09-11
+
+### 变更
+
+- fix(drag-drop): 关闭 Tauri 拖放接管，让内嵌 DSH 页面收到 HTML5 拖放
+- Tauri v2 默认 dragDropEnabled=true：文件拖放在窗口层被 Tauri 接管，webview 收不到 dragover/drop，内嵌的 dsh Web UI 里所有 HTML5 拖放（插件把拖入文件转成绝对路径、DSH 自身附件拖放）都会静默失效。改用 WebviewWindowBuilder::disable_drag_drop_handler()（tauri 2.11.5，文档明确此调用是在 Windows 前端使用 HTML5 拖放的前提）。
+
 ## [0.6.1] - 2026-09-10
 
 ### 变更
