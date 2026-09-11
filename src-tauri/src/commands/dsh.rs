@@ -179,7 +179,12 @@ pub(crate) fn create_embedded_web_gui_window(
             .title("deepseek-harness Web UI")
             .inner_size(1600.0, 900.0)
             // 载体窗口：导航全放行（不拦截 dsh Web UI 内部任何跳转）
-            .on_navigation(|_url| true);
+            .on_navigation(|_url| true)
+            // 关闭 Tauri 的拖放接管（默认开启）：否则文件拖放在窗口层就被吃掉，
+            // 内嵌页面收不到任何 HTML5 drag/drop 事件——DSH 插件（如 path-bridge
+            // 把拖入文件转成绝对路径）在 launcher 里会完全失效。
+            // tauri 文档原文：required to use HTML5 drag and drop APIs on the frontend on Windows。
+            .disable_drag_drop_handler();
             // 原生新窗口请求（window.open / 部分新窗口型链接）：
             // - 目标为 dsh Web UI 自身回环源（127.0.0.1 / localhost）→ Allow，进程内放行。
             //   （v0.5.1 修复：此前一律 Deny+系统浏览器会把 dsh UI 内部用 window.open
