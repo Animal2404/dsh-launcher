@@ -27,6 +27,9 @@ pub const PLUGIN_CHANGED_EVENT: &str = "plugin://changed";
 /// 技能共享变更事件名：共享模式/迁移完成后广播
 pub const SKILL_CHANGED_EVENT: &str = "skill://changed";
 
+/// MCP 变更事件名（ADR-0006）：新增/删除/启停完成后广播，前端刷新 MCP 列表
+pub const MCP_CHANGED_EVENT: &str = "mcp://changed";
+
 /// 通过 AppHandle 广播“dsh 安装版本已变更”（无 handle 时静默丢弃）
 pub fn emit_version_changed(app: &tauri::AppHandle) {
     let _ = app.emit(VERSION_CHANGED_EVENT, ());
@@ -45,6 +48,11 @@ pub fn emit_plugin_changed(app: &tauri::AppHandle) {
 /// 通过 AppHandle 广播“技能共享已变更”（无 handle 时静默丢弃）
 pub fn emit_skill_changed(app: &tauri::AppHandle) {
     let _ = app.emit(SKILL_CHANGED_EVENT, ());
+}
+
+/// 通过 AppHandle 广播“MCP 已变更”（无 handle 时静默丢弃）
+pub fn emit_mcp_changed(app: &tauri::AppHandle) {
+    let _ = app.emit(MCP_CHANGED_EVENT, ());
 }
 
 /// 安装阶段
@@ -102,9 +110,4 @@ pub fn progress(
         percent,
         message: message.into(),
     }
-}
-
-/// 通过 AppHandle 推送进度事件（无 handle 时静默丢弃）
-pub fn emit(app: &tauri::AppHandle, payload: &ProgressPayload) {
-    let _ = app.emit(PROGRESS_EVENT, payload.clone());
 }

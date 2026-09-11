@@ -1,6 +1,7 @@
 // 状态卡片：dsh 运行状态 + 生命周期控制 + 端口配置 + Web GUI（整合）
 // v0.4.11：内嵌打开优化——dsh 未运行时自动拉起并等待就绪，期间弹进度小窗展示阶段。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardDescription, CardTitle } from "@/components/ui/card";
@@ -10,6 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogHeader,
@@ -125,24 +127,15 @@ export default function StatusCard() {
 
   // 订阅 dsh 安装版本变更事件：卸载/安装完成后刷新安装状态 + 运行状态
   // （Rust 端在 uninstall/install 成功后广播 version://changed）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listenVersionChanged(() => {
-          getInstalledVersion()
-            .then((v) => setHasInstalled(Boolean(v)))
-            .catch(() => setHasInstalled(false));
-          refresh();
-        });
-      } catch (e) {
-        console.error("订阅版本变更事件失败", e);
-      }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [refresh]);
+  // 统一走 useTauriEvent（ADR-0009 D7）：竞态安全的解绑，不再手写 unlisten?.()
+  useRefreshOnEvent(listenVersionChanged, () => {
+      getInstalledVersion()
+        .then((v) => setHasInstalled(Boolean(v)))
+        .catch(() => setHasInstalled(false));
+      refresh();
+    },
+    [refresh],
+  );
 
   async function handleStart() {
     setBusy(true);
@@ -367,7 +360,9 @@ export default function StatusCard() {
       // 而手动"内嵌打开"时 dsh 稳定、url 为当前有效 token（303）→ 秒过。
       // 现在：循环内每次先取**最新** getWebUrl（token 更新后自然拿到新值），有
       // 有效 URL 才探测；探测通过即开窗，不通过继续取最新 URL 重试（≤40s）。
-      setStageIdx(4);
+      // 阶段推进到「获取访问地址」（索引 3）：此前直接跳到索引 4，
+      // 使 OPEN_STAGES[3] 永不展示、进度条出现跳变（ADR-0009 D19）
+      setStageIdx(3);
       const httpDeadline = Date.now() + 40_000;
       let finalUrl: string | null = null;
       while (Date.now() < httpDeadline) {
@@ -401,6 +396,9 @@ export default function StatusCard() {
       // 缓冲 300ms 让服务稳定后 WebView2 首载
       await sleep(300);
       if (!alive()) return;
+
+      // 阶段推进到「打开内嵌窗口」（最后一阶段）
+      setStageIdx(4);
 
       // ⑤ 打开目标
       if (mode === "embedded") {
@@ -447,7 +445,7 @@ export default function StatusCard() {
     <div className="flex flex-col">
       {/* 标题块（无卡片外壳：直接作为侧边栏面板内容） */}
       <div className="flex flex-col gap-1">
-        <CardTitle className="flex items-center gap-2">
+        <CardTitle className="flex flex-wrap items-center gap-2">
           <Activity className="size-4" />
           dsh 运行状态
           <Badge variant={STATUS_META[status].variant}>{STATUS_META[status].label}</Badge>
@@ -471,7 +469,8 @@ export default function StatusCard() {
               disabled={running}
             />
           </div>
-          <div className="flex gap-2">
+          {/* 生命周期按钮组：窄宽度下自动换行，不溢出侧栏 */}
+          <div className="flex min-w-0 flex-wrap gap-2">
             <Button onClick={handleStart} disabled={running || busy}>
               {busy && status === "starting" ? <Loader2 className="size-4 animate-spin" /> : <Play />}
               {busy && status === "starting" ? "启动中…" : "启动"}
@@ -498,12 +497,12 @@ export default function StatusCard() {
 
         {/* Web GUI（原独立面板，整合至此） */}
         <div className="space-y-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <MonitorUp className="size-4 text-muted-foreground" />
             <span className="text-sm font-medium">Web GUI</span>
             <Badge variant="outline">端口 {port}</Badge>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={openWebGui} disabled={guiBusy} title={guiBusy ? "正在等待 dsh Web 就绪（获取访问地址）…" : undefined}>
               <MonitorUp /> {guiBusy ? "等待 Web 就绪…" : "内嵌打开"}
             </Button>
@@ -525,7 +524,7 @@ export default function StatusCard() {
           if (!o) closeOpenGuide();
         }}
       >
-        <DialogContent showCloseButton={false} className="max-w-xs">
+        <DialogContent showCloseButton={false} className="w-[calc(100vw-2rem)] max-w-xs">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {openErr ? (
@@ -550,52 +549,55 @@ export default function StatusCard() {
             </DialogDescription>
           </DialogHeader>
 
-          {/* 进度：阶段条（0~4 映射 0~100）+ 当前阶段文案 */}
-          {!openErr && (
-            <div className="space-y-2">
-              <Progress
-                value={Math.min(100, Math.round((stageIdx / (OPEN_STAGES.length - 1)) * 100))}
-                className="h-1.5"
-              />
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                {stageIdx === OPEN_STAGES.length - 1 ? (
-                  <Loader2 className="size-3 animate-spin" />
-                ) : (
-                  <span className="size-3 shrink-0" />
-                )}
-                <span className="truncate">{OPEN_STAGES[stageIdx]}</span>
+          {/* 主体：进度 / 失败态（DialogBody 提供统一内边距与滚动） */}
+          <DialogBody className="space-y-3">
+            {/* 进度：阶段条（0~4 映射 0~100）+ 当前阶段文案 */}
+            {!openErr && (
+              <div className="space-y-2">
+                <Progress
+                  value={Math.min(100, Math.round((stageIdx / (OPEN_STAGES.length - 1)) * 100))}
+                  className="h-1.5"
+                />
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  {stageIdx === OPEN_STAGES.length - 1 ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <span className="size-3 shrink-0" />
+                  )}
+                  <span className="truncate">{OPEN_STAGES[stageIdx]}</span>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* 失败提示 + 重试/关闭 */}
-          {openErr && (
-            <div className="space-y-3">
-              <p className="break-words text-xs text-destructive">{openErr}</p>
-              <div className="flex justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={closeOpenGuide}>
-                  关闭
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    // 重试（force：失败态 guiBusy=true 也放行，重新走引导流程）
-                    setOpenErr(null);
-                    void openWithGuide(openMode.current, true);
-                  }}
-                >
-                  <RotateCw className="size-3" /> 重试
-                </Button>
+            {/* 失败提示 + 重试/关闭 */}
+            {openErr && (
+              <div className="space-y-3">
+                <p className="break-words text-xs text-destructive">{openErr}</p>
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={closeOpenGuide}>
+                    关闭
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      // 重试（force：失败态 guiBusy=true 也放行，重新走引导流程）
+                      setOpenErr(null);
+                      void openWithGuide(openMode.current, true);
+                    }}
+                  >
+                    <RotateCw className="size-3" /> 重试
+                  </Button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* 等待中：允许取消（不阻塞，用户可关闭去手动处理） */}
-          {!openErr && (
-            <Button variant="ghost" size="sm" className="self-end" onClick={closeOpenGuide}>
-              取消
-            </Button>
-          )}
+            {/* 等待中：允许取消（不阻塞，用户可关闭去手动处理） */}
+            {!openErr && (
+              <Button variant="ghost" size="sm" className="self-end" onClick={closeOpenGuide}>
+                取消
+              </Button>
+            )}
+          </DialogBody>
         </DialogContent>
       </Dialog>
     </div>

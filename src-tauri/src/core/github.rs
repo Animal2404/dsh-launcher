@@ -79,6 +79,45 @@ fn apply_git_auth(cmd: &mut std::process::Command) {
         .env("GIT_CONFIG_VALUE_0", format!("AUTHORIZATION: bearer {token}"));
 }
 
+/// 为**任意仓库**构造已配好 git 可执行、Token 与镜像语义的 clone 命令（ADR-0008）。
+///
+/// 技能导入需要克隆用户给定的任意 URL，而本模块其余函数的仓库是硬编码的 dsh 仓库
+/// （`const REPO`）。此处把「git 可执行解析 + Token 注入 + 镜像重写」这三个通用能力
+/// 导出复用，**不复制**实现，也**不改变** dsh 仓库路径的既有行为。
+///
+/// `--depth 1` 是刻意的：技能导入只关心最新内容，不需要全量历史。
+pub fn git_clone_command(
+    repo_url: &str,
+    reference: Option<&str>,
+    dest: &std::path::Path,
+) -> Result<std::process::Command, String> {
+    let mirror = AppConfig::load().github_mirror;
+    let effective = resolve_repo_url(repo_url, &mirror);
+    let mut cmd = git_command()?;
+    apply_git_auth(&mut cmd);
+    cmd.arg("clone").arg("--depth").arg("1");
+    if let Some(reference) = reference.filter(|r| !r.trim().is_empty()) {
+        cmd.arg("--branch").arg(reference.trim());
+    }
+    cmd.arg("--progress").arg(&effective).arg(dest);
+    Ok(cmd)
+}
+
+/// 计算实际使用的仓库 URL（仅在 URL 是 `https://github.com/` 且配置了镜像时重写）。
+///
+/// 对非 GitHub 地址套用 GitHub 镜像前缀只会得到无效 URL，故必须限定前缀。
+pub fn resolve_repo_url(repo_url: &str, mirror: &str) -> String {
+    let mirror = mirror.trim();
+    if mirror.is_empty() {
+        return repo_url.to_string();
+    }
+    const GH_PREFIX: &str = "https://github.com/";
+    match repo_url.strip_prefix(GH_PREFIX) {
+        Some(rest) => format!("{}/{}", mirror.trim_end_matches('/'), rest),
+        None => repo_url.to_string(),
+    }
+}
+
 /// GitHub 通道源码目录根：%LOCALAPPDATA%\dsh-launcher\github-dsh
 pub fn github_dsh_dir() -> PathBuf {
     std::env::var("LOCALAPPDATA")

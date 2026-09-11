@@ -1,20 +1,28 @@
-//! `cordis.patch.yml` 的受管区块（marker 包裹、块外逐字节保留、原子写）
+//! `cordis.patch.yml` 的受管区块通用层（marker 包裹、块外逐字节保留、原子写）
 //!
 //! dsh 只热重载两个用户 patch 层文件：`$DSH_HOME/profiles/<p>/cordis.patch.yml`
 //! 与 `$DSH_HOME/cordis.patch.yml`（见 profile-boot.ts 的 watchUserPatches）。
-//! 启动器需要往这两个文件里写两类内容，因此必须与用户手写内容共存：
+//! 启动器需要往这两个文件里写三类内容，因此必须与用户手写内容共存：
 //!
 //! - **managed 区块**（`dsh-launcher managed v1`）：按行启停（`- id:` + `disabled:`）；
-//! - **shared 区块**（`dsh-launcher shared v1`）：技能/指令共享的行配置（`- id:` + `config:`）。
+//! - **shared 区块**（`dsh-launcher shared v1`）：技能/指令共享的行配置（`- id:` + `config:`）；
+//! - **mcp 区块**（`dsh-launcher mcp v1`，ADR-0006）：MCP 声明段 + 定向段（见 `core/mcp/block.rs`）。
 //!
-//! 共同契约：
+//! 本模块是这三者的**通用层**：`BlockFamily` 描述一个 marker 家族，`read_body` /
+//! `apply_body` 按家族读写区块体；家族各自的**渲染器**（行文本形态）由调用方提供。
+//! 契约对三者一致：
 //! - 启动器只拥有 marker 之间的一段；
 //! - marker 之外的字节**逐字节不变**（注释、空行、行尾风格都保留）；
-//! - 同一期望态渲染出同一字节序列 → 可判定"无变化"从而不落盘（幂等的基础）。
+//! - 同一期望态渲染出同一字节序列 → 可判定"无变化"从而不落盘（幂等的基础）；
+//! - **同一文件的写入互斥**（见 `file_write_lock`）。
+//!
+//! 注入加固（不引入新依赖）：行 id 只允许 ASCII 字母数字与 `._-@/`，渲染时一律
+//! **YAML 单引号包裹**，阻断换行 / 引号 / `: ` / `#` / 流式符号逃逸出标量。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 /// managed 区块 marker 前缀（版本号参与解析，升级走迁移）
 pub const MARK_BEGIN_PREFIX: &str = "# >>> dsh-launcher managed ";
@@ -27,21 +35,67 @@ pub const SHARED_END_PREFIX: &str = "# <<< dsh-launcher shared ";
 /// 当前区块版本
 pub const MARK_VERSION: &str = "v1";
 
+/// 一个 marker 家族：区块的前缀 + 版本 + 描述。
+///
+/// 新增区块家族只需在此登记一个常量，通用层（`read_body` / `apply_body`）即对其生效；
+/// 家族之间 marker 互不匹配，因此同一文件里可安全共存多个区块（各自视为对方的"块外"）。
+#[derive(Debug, Clone, Copy)]
+pub struct BlockFamily {
+    /// 起始 marker 前缀（含 `# >>> ` 与家族名，以空格结尾）
+    pub begin_prefix: &'static str,
+    /// 结束 marker 前缀
+    pub end_prefix: &'static str,
+    /// 区块版本（参与解析；升级走迁移）
+    pub version: &'static str,
+    /// 人类可读描述（用于错误信息）
+    pub description: &'static str,
+}
+
+impl BlockFamily {
+    /// 起始 marker 完整文本
+    pub fn mark_begin(&self) -> String {
+        format!(
+            "{}{} — 由启动器维护，请勿手工编辑 >>>",
+            self.begin_prefix, self.version
+        )
+    }
+    /// 结束 marker 完整文本
+    pub fn mark_end(&self) -> String {
+        format!("{}{} <<<", self.end_prefix, self.version)
+    }
+}
+
+/// managed 区块家族（插件启停）
+pub const MANAGED: BlockFamily = BlockFamily {
+    begin_prefix: MARK_BEGIN_PREFIX,
+    end_prefix: MARK_END_PREFIX,
+    version: MARK_VERSION,
+    description: "插件受管区块",
+};
+
+/// shared 区块家族（技能/指令共享的行配置）
+pub const SHARED: BlockFamily = BlockFamily {
+    begin_prefix: SHARED_BEGIN_PREFIX,
+    end_prefix: SHARED_END_PREFIX,
+    version: MARK_VERSION,
+    description: "技能共享区块",
+};
+
 /// managed 区块起始 marker 完整文本
 pub fn mark_begin() -> String {
-    format!("{MARK_BEGIN_PREFIX}{MARK_VERSION} — 由启动器维护，请勿手工编辑 >>>")
+    MANAGED.mark_begin()
 }
 /// managed 区块结束 marker 完整文本
 pub fn mark_end() -> String {
-    format!("{MARK_END_PREFIX}{MARK_VERSION} <<<")
+    MANAGED.mark_end()
 }
 /// shared 区块起始 marker 完整文本
 pub fn shared_mark_begin() -> String {
-    format!("{SHARED_BEGIN_PREFIX}{MARK_VERSION} — 由启动器维护，请勿手工编辑 >>>")
+    SHARED.mark_begin()
 }
 /// shared 区块结束 marker 完整文本
 pub fn shared_mark_end() -> String {
-    format!("{SHARED_END_PREFIX}{MARK_VERSION} <<<")
+    SHARED.mark_end()
 }
 
 /// 受管条目：一行插件的启停
@@ -84,6 +138,109 @@ pub fn validate_row_id(id: &str) -> Result<(), String> {
         return Err(format!("非法行 id（含不安全字符）: {id:?}"));
     }
     Ok(())
+}
+
+/// 把值渲染成 YAML 单引号标量（阻断换行 / 引号 / `#` 逃逸出标量）。
+pub fn yaml_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+// ======================== 同文件写入互斥 ========================
+//
+// `$DSH_HOME/cordis.patch.yml` 上同时存在 **shared 区块**（ADR-0005 技能共享）
+// 与 **mcp 区块**（ADR-0006）：两者各自 splice，但读-改-写序列若交错就会互相
+// 覆盖。因此所有区块写入统一走一把**按规范化路径**区分的进程内锁。
+//
+// 实现要点：
+// - 写操作都在同步上下文 → `Mutex<HashSet<PathBuf>> + Condvar` 实现每路径互斥；
+// - **可重入状态必须是线程局部**：若放在全局，另一线程会误判"自己已持锁"直接
+//   放行，互斥即失效（并被自己的等待条件反噬成死锁）；
+// - 只有最外层守卫真正解锁，内层嵌套直接放行。
+
+use std::cell::RefCell;
+
+thread_local! {
+    /// 本线程当前持有的文件写锁及嵌套深度（仅本线程可见）
+    static THREAD_HELD: RefCell<Vec<(PathBuf, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 持有中的文件写锁路径集合
+fn locked_files() -> &'static (Mutex<HashSet<PathBuf>>, Condvar) {
+    static STATE: OnceLock<(Mutex<HashSet<PathBuf>>, Condvar)> = OnceLock::new();
+    STATE.get_or_init(|| (Mutex::new(HashSet::new()), Condvar::new()))
+}
+
+/// 文件写锁守卫（Drop 释放；仅最外层守卫真正解锁）
+#[derive(Debug)]
+pub struct FileWriteGuard {
+    key: PathBuf,
+    outermost: bool,
+}
+
+impl Drop for FileWriteGuard {
+    fn drop(&mut self) {
+        if !self.outermost {
+            // 内层：仅递减本线程嵌套深度
+            let key = self.key.clone();
+            THREAD_HELD.with(|held| {
+                let mut held = held.borrow_mut();
+                if let Some(entry) = held.iter_mut().find(|(path, _)| *path == key) {
+                    entry.1 = entry.1.saturating_sub(1);
+                    if entry.1 == 0 {
+                        held.retain(|(path, _)| *path != key);
+                    }
+                }
+            });
+            return;
+        }
+        let (lock, cvar) = locked_files();
+        {
+            let mut set = lock.lock().unwrap_or_else(|e| e.into_inner());
+            set.remove(&self.key);
+        }
+        let key = self.key.clone();
+        THREAD_HELD.with(|held| {
+            held.borrow_mut().retain(|(path, _)| *path != key);
+        });
+        cvar.notify_all();
+    }
+}
+
+/// 获取某文件的写入锁（按规范化路径区分；**同线程**可重入）。
+pub fn file_write_lock(path: &Path) -> FileWriteGuard {
+    let key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    // ① 本线程已持有 → 只递增嵌套深度（可重入，不阻塞）
+    let already_held = THREAD_HELD.with(|held| {
+        let mut held = held.borrow_mut();
+        if let Some(entry) = held.iter_mut().find(|(held_key, _)| *held_key == key) {
+            entry.1 += 1;
+            true
+        } else {
+            false
+        }
+    });
+    if already_held {
+        return FileWriteGuard {
+            key,
+            outermost: false,
+        };
+    }
+
+    // ② 跨线程互斥
+    let (lock, cvar) = locked_files();
+    let mut set = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while set.contains(&key) {
+        set = cvar.wait(set).unwrap_or_else(|e| e.into_inner());
+    }
+    set.insert(key.clone());
+    drop(set);
+    let guard_key = key.clone();
+    THREAD_HELD.with(|held| held.borrow_mut().push((guard_key, 1)));
+    FileWriteGuard {
+        key,
+        outermost: true,
+    }
 }
 
 /// 读取文件（不存在返回 None）。
@@ -176,6 +333,29 @@ enum Located {
 }
 
 fn locate_with(content: &str, begin_marker: &str, end_marker: &str) -> Located {
+    locate_with_markers(content, begin_marker, end_marker)
+}
+
+/// 通用区块定位结果：`None` = 无该家族区块；`Some((块之前, 块之后))` = 有区块。
+///
+/// 「块之外」= 用户内容 + 其它家族的区块。用于写后校验「块外字节未变」。
+pub fn split_outside(content: &str, family: BlockFamily) -> Result<Option<(String, String)>, String> {
+    let begin = family.mark_begin();
+    let end = family.mark_end();
+    match locate_with_markers(content, &begin, &end) {
+        Located::None => Ok(None),
+        Located::Broken(reason) => Err(reason),
+        Located::Block { before, after, .. } => Ok(Some((before, after))),
+    }
+}
+
+/// 读取文件当前内容（不存在返回 None）。
+pub fn read_file(path: &Path) -> Result<Option<String>, String> {
+    read_optional(path)
+}
+
+/// 通用区块定位：给定完整 marker 文本，切成「块前 / 块体 / 块后」。
+fn locate_with_markers(content: &str, begin_marker: &str, end_marker: &str) -> Located {
     let begin_count = content.matches(begin_marker).count();
     let end_count = content.matches(end_marker).count();
     if begin_count == 0 && end_count == 0 {
@@ -298,12 +478,17 @@ fn is_block_sequence(content: &str) -> bool {    content.lines().all(|line| {
 }
 
 /// 通用区块写入：`body` 为 marker 之间的内容（None/空 = 删除区块）。
+///
+/// 这是 managed / shared / mcp 三个家族的**唯一**写入路径：
+/// 先按家族的 marker 定位，再只替换 marker 之间的行，块外逐字节保留。
+/// 写入前先取该文件的 `file_write_lock`（同文件多家族互斥）。
 fn apply_body(
     path: &Path,
     begin_marker: &str,
     end_marker: &str,
     body: Option<&str>,
 ) -> Result<BlockOutcome, String> {
+    let _write_guard = file_write_lock(path);
     let existing = read_optional(path)?;
     let eol = detect_eol(existing.as_deref().unwrap_or(""));
     let rendered = match body {
@@ -434,26 +619,44 @@ pub fn apply_block(path: &Path, entries: &[ManagedEntry]) -> Result<BlockOutcome
     apply_body(path, &mark_begin(), &mark_end(), body.as_deref())
 }
 
-/// 读取 shared 区块体（无区块返回 None）。
-pub fn read_shared_body(path: &Path) -> Result<Option<String>, String> {
+// ==================== 通用层：按 marker 家族读写区块 ====================
+
+/// 读取任意家族的区块体原文（无区块返回 None）。
+///
+/// 返回的是 marker 之间的**原始文本**（已 trim 首尾空白），不做任何家族语义解析：
+/// 解析由各家族自己的渲染器 / 解析器负责（managed 走 `parse_block`，
+/// mcp 走 `core::mcp::block::parse`）。
+pub fn read_body(path: &Path, family: BlockFamily) -> Result<Option<String>, String> {
     let Some(content) = read_optional(path)? else {
         return Ok(None);
     };
-    match locate_with(&content, &shared_mark_begin(), &shared_mark_end()) {
+    match locate_with(&content, &family.mark_begin(), &family.mark_end()) {
         Located::None => Ok(None),
         Located::Broken(reason) => Err(format!("{}: {reason}", path.display())),
         Located::Block { block, .. } => Ok(Some(block.trim().to_string())),
     }
 }
 
+/// 写入任意家族的区块体（None 或空白 = 删除区块）。
+///
+/// 与 `apply_block` 共享同一段 `apply_body`：marker 语义、`[]` 占位符处理、
+/// 块外逐字节保留、幂等判定、同文件写锁全部一致。
+pub fn apply_family(
+    path: &Path,
+    family: BlockFamily,
+    body: Option<&str>,
+) -> Result<BlockOutcome, String> {
+    apply_body(path, &family.mark_begin(), &family.mark_end(), body)
+}
+
+/// 读取 shared 区块体（无区块返回 None）。
+pub fn read_shared_body(path: &Path) -> Result<Option<String>, String> {
+    read_body(path, SHARED)
+}
+
 /// 写入 shared 区块体（None 或空白 = 删除区块）。
 pub fn apply_shared_body(path: &Path, body: Option<&str>) -> Result<BlockOutcome, String> {
-    apply_body(
-        path,
-        &shared_mark_begin(),
-        &shared_mark_end(),
-        body,
-    )
+    apply_family(path, SHARED, body)
 }
 
 /// 合并/覆盖若干条目到现有区块（按 id 覆盖，其余保留），返回新条目集合。
@@ -663,5 +866,168 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(!content.contains(shared_mark_begin().as_str()));
         assert!(content.contains(mark_begin().as_str()));
+    }
+
+    // ============ T1（ADR-0006）：通用 marker-家族层 + 同文件写锁 ============
+
+    /// 一个自造的第三家族，验证通用层对任意 marker 家族生效。
+    const THIRD: BlockFamily = BlockFamily {
+        begin_prefix: "# >>> dsh-launcher third ",
+        end_prefix: "# <<< dsh-launcher third ",
+        version: "v1",
+        description: "测试用第三区块",
+    };
+
+    #[test]
+    fn test_family_markers_are_distinct_and_versioned() {
+        assert_eq!(
+            MANAGED.mark_begin(),
+            "# >>> dsh-launcher managed v1 — 由启动器维护，请勿手工编辑 >>>"
+        );
+        assert_eq!(SHARED.mark_end(), "# <<< dsh-launcher shared v1 <<<");
+        assert_eq!(THIRD.mark_begin(), "# >>> dsh-launcher third v1 — 由启动器维护，请勿手工编辑 >>>");
+        // 三个家族的 marker 互不包含（否则会互相误判为对方的块内）
+        for (a, b) in [(MANAGED, SHARED), (MANAGED, THIRD), (SHARED, THIRD)] {
+            assert!(!a.mark_begin().contains(b.mark_begin().as_str()));
+            assert!(!b.mark_begin().contains(a.mark_begin().as_str()));
+            assert!(!a.mark_end().contains(b.mark_end().as_str()));
+            assert!(!b.mark_end().contains(a.mark_end().as_str()));
+        }
+    }
+
+    #[test]
+    fn test_generic_family_read_apply_roundtrip_and_three_way_coexistence() {
+        let path = temp_path("three-families");
+        fs::write(&path, USER_TEMPLATE).unwrap();
+
+        // 三个家族各自写自己的体，互不干扰
+        apply_block(&path, &[ManagedEntry::new("row-a", true, None)]).unwrap();
+        apply_shared_body(
+            &path,
+            Some("- id: skill-filesystem\n  config:\n    agentsHome: 'X'"),
+        )
+        .unwrap();
+        let third_body = "- insert:\n    - id: third-row\n      name: third";
+        assert_eq!(
+            apply_family(&path, THIRD, Some(third_body)).unwrap(),
+            BlockOutcome::Written
+        );
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.starts_with("# 用户自己的注释\n# 第二行\n"), "块外必须逐字节保留");
+        for family in [MANAGED, SHARED, THIRD] {
+            assert!(content.contains(&family.mark_begin()), "{family:?} 起始 marker 缺失");
+            assert!(content.contains(&family.mark_end()), "{family:?} 结束 marker 缺失");
+        }
+        // 通用层按家族各自读回
+        assert_eq!(
+            read_body(&path, THIRD).unwrap().as_deref(),
+            Some(third_body)
+        );
+        assert_eq!(read_block(&path).unwrap().unwrap().len(), 1);
+        assert!(read_shared_body(&path).unwrap().is_some());
+
+        // 幂等：同体重复写 → Unchanged，文件不变
+        let before = fs::read(&path).unwrap();
+        assert_eq!(
+            apply_family(&path, THIRD, Some(third_body)).unwrap(),
+            BlockOutcome::Unchanged
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        // 删除第三家族：只删它，另外两个仍在
+        assert_eq!(
+            apply_family(&path, THIRD, None).unwrap(),
+            BlockOutcome::Written
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(!content.contains(&THIRD.mark_begin()));
+        assert!(content.contains(mark_begin().as_str()));
+        assert!(content.contains(shared_mark_begin().as_str()));
+    }
+
+    #[test]
+    fn test_broken_markers_reported_per_family() {
+        let path = temp_path("broken-third");
+        // 只有第三家族起始 marker（不成对）→ 读第三家族必须报错
+        fs::write(&path, format!("{}\n- insert: []\n", THIRD.mark_begin())).unwrap();
+        let err = read_body(&path, THIRD).unwrap_err();
+        assert!(err.contains("不成对") || err.contains("缺少结束"), "{err}");
+        // 但另外两个家族视为"无区块"（不报错、不误判）
+        assert!(read_block(&path).unwrap().is_none());
+        assert!(read_shared_body(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_file_write_lock_rejects_duplicate_acquire_after_release() {
+        // 同线程可重入；释放最外层后可再次获得（不死锁）
+        let path = temp_path("lock");
+        fs::write(&path, USER_TEMPLATE).unwrap();
+        {
+            let _outer = file_write_lock(&path);
+            let _inner = file_write_lock(&path); // 可重入，不阻塞
+            apply_block(&path, &[ManagedEntry::new("a", true, None)]).unwrap();
+        }
+        // 守卫全部释放后必须能再次进入（证明 Drop 正确解锁）
+        let _again = file_write_lock(&path);
+        apply_block(&path, &[ManagedEntry::new("a", false, None)]).unwrap();
+    }
+
+    #[test]
+    fn test_yaml_quote_escapes_single_quote_and_wraps() {
+        assert_eq!(yaml_quote("plain"), "'plain'");
+        // 单引号按 YAML 规则双写，无法闭合标量
+        assert_eq!(yaml_quote("a'b"), "'a''b'");
+        assert_eq!(yaml_quote("x'- id: evil"), "'x''- id: evil'");
+        // `: ` / `#` 都被包在标量内，不可能被解析成映射或注释
+        assert_eq!(yaml_quote("a: b # c"), "'a: b # c'");
+        for value in ["plain", "a'b", "a: b # c", "*alias", "&anchor"] {
+            let quoted = yaml_quote(value);
+            assert!(quoted.starts_with('\'') && quoted.ends_with('\''), "{quoted}");
+            assert!(!quoted.contains('\n'), "{quoted}");
+        }
+    }
+
+    #[test]
+    fn test_split_outside_returns_before_and_after() {
+        let content = "# user\n# >>> dsh-launcher mcp v1 — 由启动器维护，请勿手工编辑 >>>\n- insert:\n- id: mcp-x\n  disabled: false\n# <<< dsh-launcher mcp v1 <<<\n# tail\n";
+        let (before, after) = split_outside(content, crate::core::mcp::block::MCP)
+            .unwrap()
+            .expect("必须找到区块");
+        assert_eq!(before, "# user\n");
+        assert_eq!(after, "\n# tail\n");
+        // 无区块时返回 None
+        assert!(split_outside("# only\n[]\n", crate::core::mcp::block::MCP)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_concurrent_family_writes_are_serialized() {
+        use std::sync::Arc;
+        // 两个线程分别反复写 shared 与第三家族：若不加锁会互相覆盖（丢失对方标记）
+        let path = Arc::new(temp_path("concurrent"));
+        fs::write(&*path, USER_TEMPLATE).unwrap();
+        let shared_body = "- id: skill-filesystem\n  config:\n    agentsHome: 'X'";
+        let third_body = "- insert:\n    - id: third-row\n      name: third";
+        let handles: Vec<_> = [(SHARED, shared_body), (THIRD, third_body)]
+            .into_iter()
+            .map(|(family, body)| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    for _ in 0..40 {
+                        apply_family(&path, family, Some(body)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let content = fs::read_to_string(&*path).unwrap();
+        // 两个家族最终都在（无交错覆盖导致的丢失）
+        assert!(content.contains(&SHARED.mark_begin()), "{content}");
+        assert!(content.contains(&THIRD.mark_begin()), "{content}");
+        assert!(content.starts_with("# 用户自己的注释\n# 第二行\n"), "块外必须保留");
     }
 }

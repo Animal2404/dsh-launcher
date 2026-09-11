@@ -4,6 +4,7 @@
 //   两通道列表在进入时并发预加载（refresh 一次性拉齐），切换 Tab 零网络开销、零状态丢失，
 //   保证来回切换无 bug。安装任意通道版本时 Rust 端自动先卸载对侧通道（全局单版本）。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTauriEvent, useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,7 +32,7 @@ import {
   type InstallProgress,
 } from "@/lib/install";
 import { toast } from "sonner";
-import { Package, RefreshCw } from "lucide-react";
+import { Package, RefreshCw, Loader2 } from "lucide-react";
 import ToolchainPanel from "@/components/ToolchainPanel";
 import { cn } from "@/lib/utils";
 
@@ -124,21 +125,8 @@ export default function VersionPanel() {
 
   // 订阅 dsh 安装版本变更事件（卸载/安装后由 Rust 广播 → 刷新安装状态与路径）
   // 解决：卸载按钮在 StatusCard，而本面板 state 独立，卸载后不刷新（安装后因在本面板内才正常）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listenVersionChanged(() => {
-          refreshInstalled();
-        });
-      } catch (e) {
-        console.error("订阅版本变更事件失败", e);
-      }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [refreshInstalled]);
+  // 统一走 useTauriEvent（ADR-0009 D7）
+  useRefreshOnEvent(listenVersionChanged, () => refreshInstalled(), [refreshInstalled]);
 
   // 单一刷新按钮：并发刷新两个通道版本列表（切换 Tab 只切展示，不触发网络）
   const refreshAllChannels = useCallback(async () => {
@@ -165,24 +153,16 @@ export default function VersionPanel() {
 
   // 订阅安装进度事件（Rust 端 install://progress）
   // 仅处理 dsh 版本安装通道（npm/github）；工具链安装进度由 ToolchainPanel 自己订阅，
-  // 避免互相污染进度条
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listenProgress((p) => {
-          if (p.channel === "npm" || p.channel === "github") {
-            setProgress(p);
-          }
-        });
-      } catch (e) {
-        console.error("订阅安装进度事件失败", e);
+  // 避免互相污染进度条。统一走 useTauriEvent（ADR-0009 D7）
+  useTauriEvent(
+    listenProgress,
+    (p) => {
+      if (p.channel === "npm" || p.channel === "github") {
+        setProgress(p);
       }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
+    },
+    [],
+  );
 
   async function handleInstall(channel: string, version: string) {
     setBusy(true);
@@ -240,7 +220,7 @@ export default function VersionPanel() {
   return (
     <Card className="flex min-h-0 flex-1 flex-col">
       <CardHeader className="shrink-0">
-        <CardTitle className="flex items-center gap-2">
+        <CardTitle className="flex flex-wrap items-center gap-2">
           <Package className="size-4" />
           版本管理
           <Badge variant="default">{installedLabel ?? "未安装"}</Badge>
@@ -251,18 +231,21 @@ export default function VersionPanel() {
               disabled={refreshingInstalled}
               onClick={refreshInstalled}
               title="刷新安装状态"
+              aria-label="刷新安装状态"
             >
               <RefreshCw className={refreshingInstalled ? "animate-spin" : ""} />
             </Button>
           </div>
         </CardTitle>
-        <CardDescription>GitHub / npm 双通道 · 全局单版本（切换安装自动卸载对侧）</CardDescription>
+        <CardDescription className="break-words">
+          GitHub / npm 双通道 · 全局单版本（切换安装自动卸载对侧）
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-        {/* 通道切换按钮组 + 单一刷新按钮 */}
+        {/* 通道切换按钮组 + 单一刷新按钮：窄宽度下刷新按钮换行 */}
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <div
-            className="inline-flex items-center gap-0.5 rounded-lg bg-muted p-0.5"
+            className="inline-flex shrink-0 items-center gap-0.5 rounded-lg bg-muted p-0.5"
             role="tablist"
             aria-label="安装通道切换"
           >
@@ -278,7 +261,7 @@ export default function VersionPanel() {
                   onClick={() => setActive(t.key)}
                   title={t.hint}
                   className={cn(
-                    "px-3",
+                    "px-3 transition-all duration-200",
                     !isActive && "text-muted-foreground hover:bg-muted/70",
                   )}
                 >
@@ -290,6 +273,7 @@ export default function VersionPanel() {
           <Button
             variant="outline"
             size="sm"
+            className="shrink-0"
             disabled={refreshing}
             onClick={refreshAllChannels}
             title="刷新全部通道版本列表"
@@ -301,23 +285,23 @@ export default function VersionPanel() {
 
         {/* 安装/下载目录（任务：显示 harness 下载和安装目录） */}
         {paths && (
-          <div className="space-y-1 rounded-md border bg-muted/30 p-3 text-xs">
-            <div className="flex items-center justify-between">
+          <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/30 p-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-medium">GitHub 安装目录</span>
               <Badge variant={paths.githubInstalled ? "default" : "outline"}>
                 {paths.githubInstalled ? "已安装" : "未安装"}
               </Badge>
             </div>
-            <code className="block break-all text-muted-foreground">{paths.githubDir}</code>
+            <code className="dsh-code block">{paths.githubDir}</code>
             <Separator className="my-2" />
             <span className="font-medium">npm 全局目录</span>
-            <code className="block break-all text-muted-foreground">{paths.npmGlobalDir}</code>
-            <code className="block break-all text-muted-foreground">↳ bin: {paths.npmBinDir}</code>
+            <code className="dsh-code block">{paths.npmGlobalDir}</code>
+            <code className="dsh-code block">bin: {paths.npmBinDir}</code>
           </div>
         )}
         {/* 安装进度条（busy 或 done 时显示） */}
         {progress && (
-          <div className="rounded-md border bg-muted/30 p-3">
+          <div className="space-y-0 rounded-md border border-border/60 bg-muted/30 p-3">
             <div className="mb-2 flex items-center justify-between text-xs">
               <span className="font-medium">
                 {PHASE_LABELS[progress.phase] ?? progress.phase}
@@ -335,7 +319,7 @@ export default function VersionPanel() {
         )}
         {/* 单一融合版本列表（按钮组切换 GitHub/npm） */}
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="mb-2 flex shrink-0 items-center justify-between">
+          <div className="mb-2 flex shrink-0 flex-wrap items-center justify-between gap-2">
             <h3 className="text-sm font-medium">
               {active === "github" ? "GitHub 通道版本" : "npm 通道版本"}
               <span className="ml-2 text-xs text-muted-foreground">
@@ -353,15 +337,21 @@ export default function VersionPanel() {
               return (
                 <div
                   key={`${v.channel}-${v.version}`}
-                  className="flex items-center justify-between rounded px-2 py-1 hover:bg-muted"
+                  className="dsh-row flex flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded px-2 py-1.5 hover:bg-muted"
                 >
                   <span className="flex min-w-0 items-center gap-2 text-sm">
                     <span className="truncate">{v.version}</span>
                     {channelBadge(v.channel)}
+                    {isCur && (
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        当前使用
+                      </span>
+                    )}
                   </span>
                   <Button
                     size="xs"
-                    variant="secondary"
+                    variant={isCur ? "ghost" : "secondary"}
+                    className="shrink-0"
                     disabled={busy || isCur}
                     onClick={() => handleInstall(v.channel, v.version)}
                     title={
@@ -372,6 +362,7 @@ export default function VersionPanel() {
                           : "安装此版本"
                     }
                   >
+                    {busy && <Loader2 className="size-3 animate-spin" />}
                     {isCur ? "当前版本" : v.channel !== active ? "切换安装" : "安装"}
                   </Button>
                 </div>

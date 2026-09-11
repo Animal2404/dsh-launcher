@@ -4,6 +4,7 @@
 // - 装卸走官方 `dsh plugin --profile web ...` 通道（需要时自动重启 dsh）；
 // - upstream 插件可一键同步；自研插件不参与同步。
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +25,7 @@ import {
   type SyncReport,
 } from "@/lib/tauri";
 import { toast } from "sonner";
+import { ChevronRight, Loader2 } from "lucide-react";
 
 /** 状态徽章配色 */
 function stateVariant(state: PluginView["state"]) {
@@ -84,17 +86,14 @@ export default function PluginsPanel() {
   useEffect(() => {
     mounted.current = true;
     refresh();
-    let unlisten: (() => void) | undefined;
-    listenPluginChanged(() => {
-      refresh();
-    }).then((fn) => {
-      unlisten = fn;
-    });
     return () => {
       mounted.current = false;
-      unlisten?.();
     };
   }, [refresh]);
+
+  // 订阅 plugin://changed（安装/启停/卸载/同步后由 Rust 广播）
+  // 统一走 useTauriEvent（ADR-0009 D7）：此前用 `.then()` 无 `.catch` 且无竞态保护
+  useRefreshOnEvent(listenPluginChanged, () => refresh(), [refresh]);
 
   /** 统一封装：占用 busy 标记 → 执行 → 刷新 → 提示 */
   async function run(key: string, action: () => Promise<string>) {
@@ -172,18 +171,21 @@ export default function PluginsPanel() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground">
-          profile <span className="font-medium">{data?.profile ?? "web"}</span> ·{" "}
+      {/* 工具条：窄宽度下操作按钮组换行到统计行下方（三按钮不挤压标题） */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 text-xs text-muted-foreground">
+          profile <span className="font-medium text-foreground">{data?.profile ?? "web"}</span>
+          <span className="mx-1.5 opacity-40">·</span>
           {plugins.length} 个插件
         </div>
-        <div className="flex gap-1.5">
+        <div className="flex flex-wrap gap-1.5">
           <Button
             variant="outline"
             size="sm"
             disabled={busy !== null}
             onClick={() => sync(false)}
           >
+            {busy === "sync-check" && <Loader2 className="size-3 animate-spin" />}
             检查更新
           </Button>
           <Button
@@ -192,6 +194,7 @@ export default function PluginsPanel() {
             disabled={busy !== null}
             onClick={() => sync(true)}
           >
+            {busy === "sync" && <Loader2 className="size-3 animate-spin" />}
             同步上游
           </Button>
           <Button
@@ -201,6 +204,7 @@ export default function PluginsPanel() {
             onClick={repair}
             title="重新对账 bundles 并重放已保存的启停状态"
           >
+            {busy === "repair" && <Loader2 className="size-3 animate-spin" />}
             收敛
           </Button>
         </div>
@@ -217,16 +221,17 @@ export default function PluginsPanel() {
         <Label htmlFor="plugin-spec" className="text-xs">
           安装插件（npm 包名 / github:owner/repo#sha / 本地路径）
         </Label>
-        <div className="flex gap-1.5">
+        {/* 输入 + 来源 + 安装：窄宽度自动换行，输入框保持整行可读 */}
+        <div className="flex flex-wrap items-center gap-1.5">
           <Input
             id="plugin-spec"
             value={spec}
             onChange={(e) => setSpec(e.target.value)}
             placeholder="dsh-cost-meter 或 github:owner/repo#<sha>"
-            className="text-xs"
+            className="min-w-[12rem] flex-1 text-xs"
           />
           <select
-            className="w-28 shrink-0 rounded-md border bg-background px-1.5 text-xs"
+            className="dsh-select w-28 shrink-0"
             value={origin}
             onChange={(e) => setOrigin(e.target.value as PluginOrigin)}
             title="来源决定是否参与自动同步"
@@ -238,15 +243,18 @@ export default function PluginsPanel() {
           <Button
             variant="secondary"
             size="sm"
+            className="shrink-0"
             disabled={busy !== null}
             onClick={install}
           >
+            {busy === "install" && <Loader2 className="size-3 animate-spin" />}
             安装
           </Button>
         </div>
-        <p className="text-[11px] text-muted-foreground">
-          git 源建议钉 commit（`github:owner/repo#&lt;sha&gt;`）；pnpm 若拒绝执行构建脚本，
-          请按日志提示把包名加入 profile 的 pnpm-workspace.yaml allowBuilds 后再装。
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          git 源建议钉 commit（<code className="dsh-code">github:owner/repo#&lt;sha&gt;</code>）。
+          pnpm 若拒绝执行构建脚本，请按安装日志的提示自行处理
+          （启动器把 pnpm 输出原样转发，不代写任何 pnpm 配置）。
         </p>
       </div>
 
@@ -261,17 +269,16 @@ export default function PluginsPanel() {
           const canToggle =
             !degraded && (item.state === "enabled" || item.state === "disabled");
           const isOpen = expanded[item.package] === true;
+          const isBusy = busy === `toggle:${item.package}` || busy === `uninstall:${item.package}`;
           return (
-            <div
-              key={item.package}
-              className="rounded-md border border-border/60 p-2 space-y-1.5"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
+            <div key={item.package} className="dsh-list-row space-y-1.5 p-2">
+              {/* 行头：窄宽度下控件组换行 */}
+              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      className="truncate text-left text-xs font-medium hover:underline"
+                      className="flex min-w-0 items-center gap-1 truncate text-left text-xs font-medium hover:underline"
                       onClick={() =>
                         setExpanded((prev) => ({
                           ...prev,
@@ -279,11 +286,15 @@ export default function PluginsPanel() {
                         }))
                       }
                       title="展开行状态"
+                      aria-expanded={isOpen}
                     >
-                      {item.package}
+                      <ChevronRight
+                        className={`size-3 shrink-0 text-muted-foreground transition-transform duration-200 ${isOpen ? "rotate-90" : ""}`}
+                      />
+                      <span className="truncate">{item.package}</span>
                     </button>
                     {item.version && (
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
                         {item.version}
                       </span>
                     )}
@@ -317,7 +328,7 @@ export default function PluginsPanel() {
                     disabled={busy !== null || item.protected}
                     onClick={() => uninstall(item)}
                   >
-                    卸载
+                    {isBusy ? "处理中…" : "卸载"}
                   </Button>
                 </div>
               </div>
@@ -392,7 +403,7 @@ export default function PluginsPanel() {
           <div className="space-y-1 text-[11px]">
             <div className="text-xs font-medium">同步结果</div>
             {syncReport.items.map((item) => (
-              <div key={item.package} className="flex items-start gap-1.5">
+              <div key={item.package} className="flex flex-wrap items-start gap-1.5">
                 <Badge
                   variant={
                     item.result === "ok"
@@ -405,7 +416,7 @@ export default function PluginsPanel() {
                   {item.result}
                 </Badge>
                 <span className="text-foreground">{item.package}</span>
-                <span className="text-muted-foreground">{item.message}</span>
+                <span className="min-w-0 flex-1 text-muted-foreground">{item.message}</span>
               </div>
             ))}
           </div>

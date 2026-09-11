@@ -1,0 +1,95 @@
+# 夜间网络/环境集成测试（ADR-0009 D13）
+#
+# 为什么单独一个 workflow：
+# 下列测试依赖**真实网络或真实 dsh 环境**，被 `#[ignore]` 标记，因此不会进 CI 门禁
+# （CI 要求 hermetic、稳定、快）：
+#   - `github_tag_test`            → `git ls-remote` 真实查询 GitHub
+#   - `npm_versions_test`          → `npm view` 真实查询 registry
+#   - `direct_node_capture_test`   → 需真实 node + dsh 环境捕获 token
+#
+# 在此之前它们**从未被任何流水线执行**（CI 不跑 `--ignored`），等于三条真实链路零自动化
+# 覆盖。本 workflow 每晚以 `--ignored` 跑一遍，使上游行为变化（GitHub/npm 接口、
+# dsh 输出格式）能在一天内被发现。
+#
+# 设计约束：
+#   - **失败不阻断 master**（这些测试受外部服务可用性影响，不应当作代码质量门禁）；
+#   - 结果以 workflow 运行状态呈现 + 上传日志，便于人工/后续自动化查看；
+#   - 也支持手动触发（workflow_dispatch）便于发布前抽查。
+
+name: Nightly (network & env integration)
+
+on:
+  schedule:
+    # 每天 03:17 UTC（避开整点高峰）；cron 用 UTC
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ignored-tests:
+    name: 运行 #[ignore] 网络/环境集成测试
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # 不作为 master 门禁：即使失败也不影响其它流水线
+    continue-on-error: true
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 安装 Node.js（22）
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust 工具链
+        # pin SHA 后必须显式传 toolchain（本 action 由 @rev 推断，官方 README）
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci --include=dev
+
+      - name: 网络/环境集成测试（--ignored）
+        # 逐文件运行并汇总：任一文件失败不掩盖其它文件的结果
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tests = @(
+            'github_tag_test',
+            'npm_versions_test',
+            'direct_node_capture_test'
+          )
+          $failed = @()
+          foreach ($t in $tests) {
+            Write-Host "=========== $t ==========="
+            cargo test --manifest-path src-tauri/Cargo.toml --test $t -- --ignored --nocapture --test-threads=1
+            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host ""
+            Write-Host "以下测试失败（外部依赖相关，不阻断 master）: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host ""
+          Write-Host "全部网络/环境集成测试通过"
+
+      - name: 上传测试日志（失败诊断用）
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-ignored-test-logs
+          path: |
+            src-tauri/target/debug/deps/*.log
+          if-no-files-found: ignore
+          retention-days: 14

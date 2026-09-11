@@ -289,15 +289,9 @@ body {
 .right-panel-container [data-slot="scroll-area-viewport"] {
   overflow-x: hidden;
 }
-/* 日志 pre：宽度不溢出（break 所有字符），右侧留出 overlay 滚动条宽度 */
-.right-panel-container [data-slot="scroll-area"] pre {
-  width: 100%;
-  min-width: 0;
-  padding-right: 0.75rem;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-/* 日志 pre：宽度不溢出（break 所有字符），右侧为原生滚动条让位 */
+/* 日志 pre：宽度不溢出（break 所有字符），右侧为原生滚动条让位。
+   注：本规则此前重复定义两次（padding-right 0.75rem 被后一条 0.6rem 覆盖，
+   前者为死规则），ADR-0009 D19 合并为一条、保留实际生效的 0.6rem。 */
 .right-panel-container [data-slot="scroll-area"] pre {
   width: 100%;
   min-width: 0;
@@ -507,5 +501,213 @@ body {
   .right-panel-container > * {
     width: 100%;
     min-width: 0;
+  }
+}
+
+/* ==================================================================================
+   v0.7.1 统一动效与响应式加固层
+   ----------------------------------------------------------------------------------
+   设计原则：
+   1. 动效令牌集中于此，组件只引用变量 —— 全站时长/缓动一致，改一处全站生效；
+   2. 所有动效都在 prefers-reduced-motion 下降级为「瞬时」，无障碍优先；
+   3. 尺寸一律「上限 + 视口自适应」双约束，任何窗口尺寸都不溢出、不贴边。
+   ================================================================================== */
+
+:root {
+  /* 动效令牌：快 = 状态反馈，中 = 进场/展开，慢 = 面板位移 */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-slow: 260ms;
+  /* 统一缓动：出场偏「加速」，进场偏「减速」，符合物理直觉 */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 弹窗尺寸上限（调用方未声明宽度时的兜底；四个管理面板自行声明 768px） */
+  --dialog-max-width: 24rem;
+  --dialog-max-height: calc(100dvh - 2rem);
+}
+
+/* ---- 弹窗兜底：仅在调用方未声明宽度时生效 ----
+   使用 :where() 把特异性降到 0，任何工具类（w-* / max-w-*）都能无冲突覆盖，
+   从根上杜绝 v0.7.0 那种「基线类压掉调用方宽度」的级联事故。 */
+@layer components {
+  :where(.dialog-content) {
+    width: min(var(--dialog-max-width), calc(100vw - 2rem));
+    max-height: var(--dialog-max-height);
+  }
+  /* 弹窗内网格行：头部 auto、主体撑满（让主体成为唯一滚动区）
+     注意：本规则位于 components 层，任何 grid-* / overflow-* 工具类都能覆盖它 */
+  :where(.dialog-content) {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  /* 无 DialogBody 的确认类弹窗：单行自适应（内容自身高度决定弹窗高度） */
+  :where(.dialog-content):not(:has([data-slot="dialog-body"])) {
+    grid-template-rows: auto;
+  }
+}
+
+/* ---- 内联「代码/路径」统一样式（原实现散落各处，此处收敛） ---- */
+.dsh-code {
+  border-radius: calc(var(--radius) - 5px);
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+  padding: 0.05rem 0.3rem;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.95em;
+  word-break: break-all;
+}
+
+/* ---- 原生下拉框统一外观 ----
+   原实现里 <select> 是浏览器默认控件（方角、灰边、无焦点环），与 shadcn 圆角语言割裂；
+   此处与 Input 对齐：同高、同圆角、同边框、同焦点环（含主题变量与禁用态）。 */
+.dsh-select {
+  height: 1.75rem; /* 与 Input 的 h-7 对齐 */
+  min-width: 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--input);
+  background-color: transparent;
+  padding-inline: 0.4rem 1.4rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--foreground);
+  outline: none;
+  appearance: none;
+  /* 自绘箭头：与 lucide 视觉重量一致，避免各平台原生箭头差异 */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.35rem center;
+  background-size: 0.85rem;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+  cursor: pointer;
+}
+.dark .dsh-select {
+  background-color: color-mix(in oklab, var(--input) 30%, transparent);
+}
+.dsh-select:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ring) 60%, var(--input));
+}
+.dsh-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+.dsh-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+/* 下拉展开项：深色主题下原生列表强制用主题底色，避免白底闪烁 */
+.dsh-select option {
+  background-color: var(--popover);
+  color: var(--popover-foreground);
+}
+
+/* ---- 原生多行文本域统一外观（原始 YAML 通道） ---- */
+.dsh-textarea {
+  width: 100%;
+  min-height: 7rem;
+  resize: vertical;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--input);
+  background-color: transparent;
+  padding: 0.5rem;
+  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: var(--foreground);
+  outline: none;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+.dark .dsh-textarea {
+  background-color: color-mix(in oklab, var(--input) 30%, transparent);
+}
+.dsh-textarea::placeholder {
+  color: var(--muted-foreground);
+}
+.dsh-textarea:focus-visible {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+/* ---- 复选框统一外观（与 Switch 的圆角语言一致） ---- */
+.dsh-checkbox {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex-shrink: 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+/* ---- 列表行容器：hover 提亮 + 描边过渡（回答"指针在哪一行"） ---- */
+.dsh-list-row {
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+.dsh-list-row:hover {
+  border-color: color-mix(in oklab, var(--ring) 45%, transparent);
+  background-color: color-mix(in oklab, var(--muted) 35%, transparent);
+}
+
+/* ---- 面板入口按钮：容器查询驱动的自适应（窄侧栏自动收成纯图标） ---- */
+.sidebar-body {
+  container-type: inline-size;
+}
+/* 侧栏被拖到很窄（容器 < 240px）时隐藏文字标签，只留图标，防挤压换行 */
+@container (max-width: 240px) {
+  .panel-entry-label {
+    display: none;
+  }
+}
+
+/* ---- 统一可交互元素过渡：hover/焦点状态平滑，且不干扰拖拽 ---- */
+.panel-resize-handle::after {
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+/* ---- 列表行 hover 底色过渡 ---- */
+.dsh-row {
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+/* ---- 视图切换进场：一次性淡入上浮，回答"内容换了一批" ---- */
+@keyframes dsh-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.dsh-fade-in {
+  animation: dsh-fade-in var(--motion-base) var(--ease-entrance);
+}
+/* 弹窗遮罩/内容统一走令牌时长（覆盖 tw-animate-css 的默认值） */
+[data-slot="dialog-overlay"] {
+  animation-duration: var(--motion-base);
+  animation-timing-function: var(--ease-standard);
+}
+[data-slot="dialog-content"] {
+  animation-duration: var(--motion-base);
+  animation-timing-function: var(--ease-entrance);
+}
+
+/* ---- 无障碍：尊重「减弱动态效果」系统偏好 ----
+   关闭所有非必要位移/缩放动画，保留即时状态切换（不做"禁用动效"以外的功能删减） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* 加载指示器仍需可见地"在转"，否则会被误判为卡死 —— 保留旋转 */
+  .animate-spin {
+    animation-duration: 1s !important;
+    animation-iteration-count: infinite !important;
   }
 }

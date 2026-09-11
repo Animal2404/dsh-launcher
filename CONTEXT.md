@@ -35,9 +35,49 @@
 
 ## 技能共享（ADR-0005）
 
-- **共享真源（canonical store）**：`~/.agents/agent`（`skills/`、`AGENTS.md`、`CONTEXT.md`）。
-- **共享模式**：`link`（`~/.dsh` 下同名资源链接到真源）| `config`（写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块，让 dsh 直接读真源）。
-- **资源状态**：`missing` | `linked` | `config` | `conflict`（真实文件/目录，绝不自动删除）| `broken`（链接指向别处或断裂）。
+- **共享真源（canonical store）**：**官方 `agentsHome` 根**（默认 `~/.agents`）——技能 = `~/.agents/skills`（官方 `skill-filesystem` 的 `user-agents` 根，rank 500）；指令 = `~/.agents/AGENTS.md`；词表 = `~/.agents/CONTEXT.md`（dsh 不读）。**不再是 `~/.agents/agent`**（ADR-0006 D17 修订）。
+- **共享模式**：`link`（`<dshHome>/AGENTS.md` 链接到真源；技能**无需链接**，由官方 rank 500 原生覆盖）| `config`（写 `$DSH_HOME/cordis.patch.yml` 的 shared 区块，让 dsh 直接读真源）。
+- **资源状态**：`missing` | `linked` | `config` | `conflict`（真实文件/目录，绝不自动删除）| `broken`（链接指向别处或**断裂**）| `native`（该资源**不需要**链接，真源已由官方扫描根原生覆盖）。
+- **需要链接判定（`needs_link`）**：由官方事实决定 —— `agents-md` **需要**（官方固定读 `<dshHome>/AGENTS.md`）；`skills` 与 `context-md` **不需要**（技能走官方 rank 500 根；dsh 不读 `CONTEXT.md`）。判定链顺序为「链接 → 真实文件 → 原生根」，因此视图侧遗留的**断链**不会被误判成 `native`。
+- **链接修复动作（`skill repair-links`）**：一次性、**可幂等重跑**的迁移动作 —— 修复需要链接的资源；清理**启动器自己创建的断链**（目标落在 `agentsHome` 下的）；保留一切含用户内容的真实文件/目录，以及指向 `agentsHome` **之外**的用户自建链接。绝不删除用户内容。
+- **白名单唯一例外（失败回滚）**：官方无"回退到任意历史 lock 状态"的能力，故 `package.json` / `pnpm-lock.yaml` / `pnpm-workspace.yaml` / `cordis.patch.yml` 仅允许在**失败回滚**时由备份还原写入（`core/plugin/mod.rs::rollback_after_failed_official_op` **一处**），且其后**必跟**一次官方通道 `dsh plugin … install` 收敛（ADR-0006 D18）。
+
+## 技能管理（ADR-0007）
+
+- **技能（skill）**：官方 `skill-filesystem` 的发现单元 —— 扫描根**顶层**的 `<name>/SKILL.md` 目录包，或 `<name>.md` 平铺文件。官方**刻意不发现嵌套的 `**/SKILL.md`**（只发现一层）。技能目录自身即资源基（`resourceBase`）：正文可按相对路径引用同目录的兄弟文件（`CONTEXT-FORMAT.md`、`ADR-FORMAT.md`、`tests.md` 等），故技能是**目录**，不是单个文件。
+- **技能根（skill root）**：官方六个扫描根及优先级 rank —— 项目 `.dsh/skills`(100) / 项目 `.agents/skills`(200) / custom(300) / 用户 `<DSH_HOME>/skills`(400，忽略 `.system`) / 用户 `<agentsHome>/skills`(500) / bundled(600，真实安装下不存在)。**项目根取决于 dsh 会话的工作区**（非进程 CWD），启动器不可知；custom 根由 preset 声明且不出现于合成配置。故启动器**只管理 400 与 500 两个用户级根**。
+- **模型可调用（modelInvocable）**：frontmatter `disable-model-invocation` 的取反。为 false 时技能不进模型可见目录、`skill` 工具不暴露，但**仍可由人在 dsh GUI 输入 `/名称` 调用**。
+- **用户可调用（userInvocable）**：frontmatter `user-invocable`。为 false 时技能不进 `/` 建议菜单。
+- **停用（disable）**：本产品的单一开关，语义 = 写 `disable-model-invocation: true`。**停用 ≠ 不可用** —— 用户仍可 `/名称` 手动调用；停用只关闭官方两个调用面中的「模型面」。
+- **技能启用状态**：`unset`（无该键 = 官方默认允许模型调用）/ `enabled` / `disabled` / `conflict`（重复键或非规范布尔值 —— 只读，拒绝操作）。
+- **生效技能 / 被同名覆盖技能**：同名技能按 rank **数值大者生效**；被覆盖者仍在磁盘上仍被加载，但停用它对模型无影响。
+- **技能来源**：`local`（本地创建或来历不明）/ `imported`（由 git URL 导入，记有来源 URL 与 commit）。
+- **导入（import）**：把 git 仓库中递归收集到的技能**扁平化**到用户级技能根的 `<name>/`；目标目录名取 frontmatter 的 `name`，而非仓库内的目录名。
+- **来源记录（skill source record）**：记录「哪个技能来自哪个 URL 的哪个 commit」的元数据，供人工核对与**手动**检查更新。**不驱动任何自动更新。** 落盘文件名固定为 `skill-sources.json` —— **不得**用 `skills.json`，该名字已被退役的共享模块占用（存 `preferred_mode`/`last_applied`）。
+- **技能共享（已退役）**：原 ADR-0005 的 link / config 两种共享模式及其迁移动作在本产品中退役 —— 技能走官方 rank 500 原生覆盖，本不需要链接。前端入口已移除；Rust 后端保留供 CLI（`skill status|apply|migrate|repair-links`）作应急路径。
+
+## 技能导入与更新（ADR-0008）
+
+- **导入（import）**：把任意 git 仓库**浅克隆到临时目录**，**递归收集所有 `SKILL.md`**，逐个校验（`name`/`description` 必需、`name` 满足官方 `isSkillName`）后**扁平化**到 `<agentsHome>/skills/<name>/`。**整目录复制**（含兄弟资源文件与 `agents/` 子目录）—— 技能是目录，只复制 `SKILL.md` 会断引用。目标目录名取 frontmatter 的 `name`，不取仓库目录名。
+- **文件级覆盖（Q29 A）**：导入/更新时上游提供的文件覆盖、**本地独有文件/目录保留**、**上游已删除的文件不落地删除**。应用前有「预览清单」需二次确认。
+- **检查更新（check updates）**：对来源注册表里的每个 URL 做**纯手动**检查（浅克隆 → 逐文件比内容 → 三类清单：新增/覆盖/本地独有保留）。**永不自动写盘**、无任何定时任务。
+- **来源记录（skill source record）**：`skill-sources.json`（schemaVersion 1）记录「哪个技能来自哪个 URL 的哪个 commit」；**不得**命名为 `skills.json`（已被退役的 ADR-0005 共享模块占用）。缺失/损坏时降级为空注册表，不阻塞主功能。
+- **外部打开（open）**：前端只能传**闭集枚举**（`agents-md` / `context-md` / `skills-root`）或某个受管技能文件路径，路径由 Rust 从 `dshhome` helper 推导或按 ADR-0007 D10 校验归属 —— 前端**结构上无法**打开任意路径。退回链：配置的编辑器 → 系统默认程序（`ShellExecuteW`）→ 报错提示。
+- **可配置编辑器**：`AppConfig.editor_command`（空 = 系统默认程序）。自由文本、引号感知切分，支持 `code --wait` 这类命令行。首次点击编辑弹一次性引导。
+
+## MCP server 管理（ADR-0006）
+
+- **MCP server 条目**：cordis 配置树中的一行，`name: '@deepseek-ai/dsh-mcp-client'`，其 `config.serverName` 是该服务器面向模型的命名空间。一个条目 = 一个 MCP server。仅桥接 Tools（resources / prompts 不支持）。
+- **serverName**：条目的面向模型命名空间，工具名形如 `mcp__<serverName>__<tool>`。须匹配 `[A-Za-z0-9_-]{1,32}`，且在同一**注册作用域**内唯一。启动器以它作为管理标识键（而非行 id）。
+- **行 id（rowId）**：条目的 cordis 标识；启动器声明的行固定用 `mcp-<serverName>`。
+- **受管 MCP 区块（managed MCP block）**：启动器在 `$DSH_HOME/cordis.patch.yml`（机器级）中拥有的一段（marker 包裹），**两段式**——`insert:` 声明段 + `id`/`disabled:` 定向段。块外内容逐字节保留。
+- **受管声明 / 外部声明**：条目的 `- insert:` 行位于受管区块内 = **受管声明**（`remove` 可真删除）；由 bundle、profile patch、home 文件用户区或 `--patch` 给出 = **外部声明**（`remove` 仅撤销定向覆盖，声明仍在）。
+- **定向覆盖（id-targeted override）**：`- id: <rowId>` + `disabled:` 形式的独立 patch 条目，用于覆盖既有行的启停；可命中同层后置条目与**全部更早层**（home 层是最后持久层，故机器级定向覆盖对全层有效）。
+- **注册作用域（registration scope）**：官方对 `serverName` 唯一性的强制范围；同一作用域内重复时，**后加载的实例在加载期失败，先前实例不受影响**。启动器只管理 root 作用域。
+- **MCP 状态**：`missing`（合成树无该 serverName 的行）| `enabled`（有效 `disabled != true`）| `disabled`（有效 `disabled == true`）。行级另有无状态标记：`expression`（`disabled` 为 `!!js`，拒绝覆盖）| `conflict`（serverName 重复）| `dangerous`（`failOnStartupError: true`，可使 harness 启动中止）。
+- **MCP 前置（prerequisite）**：`@deepseek-ai/dsh-mcp-client` 在受管 profile 的**可解析性**（非 `dependencies` 成员、非 bundle）；缺失时 MCP 页显示横幅并引导至插件页安装，**MCP 页不重复建设装卸入口**。
+- **危险字段 `failOnStartupError`**：官方默认 `false`（失败仅 warn、harness 照常启动）；设为 `true` 时初始连接失败会让该 fiber FAILED，进而使**整个 harness 启动中止**。故 `disabled: true` 是该行唯一安全的隔离手段；启动器结构化通道不暴露该字段。
+- **可观测性边界**：官方**不存在**列 MCP 状态或列工具的 CLI；`--dump-config` **不启动插件**、只证明**配置合成层**；`pluginInventory/list` 为 Remote-only 且不含 `serverName` 与 `mcp__*` 工具名。故脚本化证据只有「重新 dump 的目标行 `disabled`」与「dsh stderr 的 logger 行 + 有界窗口」，工具是否出现由人工确认（ADR-0006 D12 / §Testing 3.3）。
 
 ## 镜像源（镜像维度）
 

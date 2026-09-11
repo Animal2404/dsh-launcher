@@ -65,11 +65,6 @@ export function createWebGuiWindow(url: string): Promise<string> {
   return invoke("create_web_gui_window", { url });
 }
 
-/** 为内嵌 Web GUI 窗口设置高清任务栏图标（Rust 创建路径内部已设置；本命令为兜底重试） */
-export function setWebGuiIcon(label: string): Promise<void> {
-  return invoke("set_web_gui_icon", { label });
-}
-
 /** 创建桌面快捷方式（双击用默认浏览器打开 dsh web） */
 export function createDesktopShortcut(): Promise<string> {
   return invoke("create_desktop_shortcut");
@@ -169,7 +164,6 @@ export interface AppConfig {
   githubMirror: string;
   /** v0.4.13：Rust 不再回传明文 token，只回传是否已设置 */
   githubTokenSet: boolean;
-  githubToken: string;
   nodeMirror: string;
   closeExits: boolean;
   minimizeToTray: boolean;
@@ -179,6 +173,10 @@ export interface AppConfig {
   autoOpenBrowser: boolean;
   /** 启动后自动同步 upstream 插件（自研插件不受影响） */
   autoSyncPlugins: boolean;
+  /** 外部编辑器命令（空 = 系统默认关联程序，见 ADR-0008） */
+  editorCommand: string;
+  /** 是否已问过「用哪个程序打开」（首次点击编辑时弹一次引导） */
+  editorPromptSeen: boolean;
 }
 
 /** 读取配置 */
@@ -222,6 +220,17 @@ export function setSwitches(opts: {
   return invoke("set_switches", opts);
 }
 
+/** 保存外部编辑器配置（ADR-0008） */
+export function setEditor(opts: {
+  editorCommand: string;
+  promptSeen: boolean;
+}): Promise<void> {
+  return invoke("set_editor", {
+    editorCommand: opts.editorCommand,
+    promptSeen: opts.promptSeen,
+  });
+}
+
 
 /** 列出日志文件 */
 export function listLogs(): Promise<LogFile[]> {
@@ -238,7 +247,7 @@ export function readLog(relPath: string): Promise<string> {
 /** 插件变更事件名（对应 Rust PLUGIN_CHANGED_EVENT） */
 export const PLUGIN_CHANGED_EVENT = "plugin://changed";
 
-/** 技能共享变更事件名（对应 Rust SKILL_CHANGED_EVENT） */
+/** 技能变更事件名（对应 Rust SKILL_CHANGED_EVENT）：管理侧启停/删除后广播 */
 export const SKILL_CHANGED_EVENT = "skill://changed";
 
 /** 订阅插件变更事件 */
@@ -250,7 +259,7 @@ export async function listenPluginChanged(
   });
 }
 
-/** 订阅技能共享变更事件 */
+/** 订阅技能变更事件（启停/删除后后端广播；前端据此重扫） */
 export async function listenSkillChanged(
   onChanged: () => void,
 ): Promise<UnlistenFn> {
@@ -379,112 +388,377 @@ export function pluginRepair(pkg?: string): Promise<OpResult> {
   return invoke("plugin_repair", { package: pkg ?? null });
 }
 
-// ==================== 技能共享（ADR-0005） ====================
+// ==================== 技能管理（ADR-0007） ====================
+//
+// 数据来源是**文件系统扫描**（官方 `skills/list` Remote 只读且不含路径，无法用于
+// 定位文件）。因此全部操作只依赖文件系统，**与 dsh 运行状态完全无关**。
 
-/** 资源状态（对应 Rust ResourceState） */
-export type ResourceState =
-  | "missing"
-  | "linked"
-  | "config"
-  | "conflict"
-  | "broken";
+/** 技能可用状态（对应 Rust SkillState） */
+export type SkillState = "enabled" | "disabled" | "conflict" | "unreadable";
 
-/** 单个共享资源状态 */
-export interface ResourceStatus {
-  resource: string;
-  canonical: string;
-  view: string;
-  state: ResourceState;
-  detail: string;
+/** 一条受管技能（对应 Rust SkillEntry） */
+export interface SkillEntry {
+  /** 绝对路径：**身份键**，写操作回传该值作身份声明 */
+  path: string;
+  /** frontmatter 的 name */
+  name: string;
+  /** frontmatter 的 description */
+  description: string;
+  /** frontmatter 的 whenToUse */
+  whenToUse?: string | null;
+  /** 可用状态；`conflict` / `unreadable` 为只读，开关须禁用 */
+  state: SkillState;
+  /** 根标识：`user-dsh`（rank 400）/ `user-agents`（rank 500） */
+  source: string;
+  /** 官方 rank（400 / 500） */
+  rank: number;
+  /** 目录包 `<name>/SKILL.md` 还是平铺 `<name>.md` */
+  bundled: boolean;
+  /** 不可用时的具名原因 */
+  reason?: string | null;
+  /** 被同名更高 rank 技能覆盖时，覆盖者的名字 */
+  overriddenBy?: string | null;
+  /** 是否符号链接（链接技能禁止删除） */
+  isSymlink: boolean;
+  /** 所在根是否存在 */
+  rootExists: boolean;
 }
 
-/** 技能共享总状态 */
-export interface SkillStatus {
-  canonicalRoot: string;
-  dshHome: string;
-  agentsHome: string;
-  linkCapable: boolean;
-  activeMode: string;
-  preferredMode: string;
-  resources: ResourceStatus[];
+/** 受管根状态 */
+export interface SkillRootStatus {
+  path: string;
+  source: string;
+  rank: number;
+  exists: boolean;
   skillCount: number;
 }
 
-/** 应用结果 */
-export interface SkillApplyReport {
-  mode: string;
+/** 技能列表（对应 Rust SkillList） */
+export interface SkillList {
+  skills: SkillEntry[];
+  roots: SkillRootStatus[];
+  disabledCount: number;
+  conflictCount: number;
+  unreadableCount: number;
+  trashCount: number;
+  backupRoot: string;
+}
+
+/** 启停结果 */
+export interface SkillToggleReport {
+  /** false = 已是目标状态（幂等空操作，未写盘） */
   changed: boolean;
   message: string;
-  resources: ResourceStatus[];
+  backup?: string | null;
 }
 
-/** 迁移动作 */
-export interface MigrateAction {
-  resource: string;
-  action: string;
-  detail: string;
+/** 删除结果 */
+export interface SkillDeleteReport {
+  trashedTo: string;
+  message: string;
 }
 
-/** 迁移报告 */
-export interface MigrateReport {
-  dryRun: boolean;
-  actions: MigrateAction[];
+/** 列出全部受管技能（只读） */
+export function skillList(): Promise<SkillList> {
+  return invoke("skill_list");
 }
 
-/** 读取技能共享状态 */
-export function skillStatus(): Promise<SkillStatus> {
-  return invoke("skill_status");
+/**
+ * 启用/停用技能。
+ *
+ * `path` 与 `name` 是身份声明（ADR-0007 D10）：后端写前会重新扫描，要求磁盘上该路径的
+ * frontmatter `name` 与之相符，否则拒绝并提示刷新。
+ */
+export function skillSetEnabled(
+  path: string,
+  name: string,
+  enabled: boolean,
+): Promise<SkillToggleReport> {
+  return invoke("skill_set_enabled", { path, name, enabled });
 }
 
-/** 应用共享模式（auto/link/config） */
-export function skillApply(
-  mode: "auto" | "link" | "config",
-  resource?: string,
-): Promise<SkillApplyReport> {
-  return invoke("skill_apply", { mode, resource: resource ?? null });
+/** 删除技能（移入 `<root>/.trash/`，可恢复） */
+export function skillDelete(
+  path: string,
+  name: string,
+): Promise<SkillDeleteReport> {
+  return invoke("skill_delete", { path, name });
 }
 
-/** 迁移冲突资源（dryRun 只报告） */
-export function skillMigrate(dryRun: boolean): Promise<MigrateReport> {
-  return invoke("skill_migrate", { dryRun });
+// ==================== 技能导入 / 更新 / 打开（ADR-0008） ====================
+
+/** 单文件差异类型（对应 Rust FileChange） */
+export type FileChange = "added" | "updated" | "same" | "localOnly" | "removed";
+
+/** 单文件差异 */
+export interface SkillFileDiff {
+  path: string;
+  change: FileChange;
 }
 
-// ═══════════════ TokenTracker（Token 统计面板）═══════════════
-
-/** TokenTracker 运行状态（对应 Rust TokentrackerStatus） */
-export type TokentrackerStatus = "stopped" | "starting" | "running" | "stopping" | "error";
-
-/** 查询 TokenTracker 运行状态 */
-export function getTokentrackerStatus(): Promise<TokentrackerStatus> {
-  return invoke("get_tokentracker_status");
+/** 单个技能的导入计划（对应 Rust SkillImportPlan） */
+export interface SkillImportPlan {
+  name: string;
+  repoPath: string;
+  targetPath: string;
+  actionable: boolean;
+  added: number;
+  updated: number;
+  same: number;
+  localOnly: number;
+  removedUpstream: number;
+  files: SkillFileDiff[];
+  skipReason?: string | null;
 }
 
-/** 查询 TokenTracker 看板端口（0 = 未运行） */
-export function getTokentrackerPort(): Promise<number> {
-  return invoke("get_tokentracker_port");
+/** 导入/检查结果（对应 Rust ImportReport） */
+export interface SkillImportReport {
+  url: string;
+  commit?: string | null;
+  plans: SkillImportPlan[];
+  applied: boolean;
+  message: string;
 }
 
-/** 检测 tokentracker-cli 是否已安装 */
-export function detectTokentrackerCli(): Promise<boolean> {
-  return invoke("detect_tokentracker_cli");
+/** 从 git URL 导入技能（apply=false 为只读预览） */
+export function skillImportUrl(
+  url: string,
+  apply: boolean,
+): Promise<SkillImportReport> {
+  return invoke("skill_import_url", { url, apply });
 }
 
-/** 安装 tokentracker-cli（npm 全局） */
-export function installTokentrackerCli(): Promise<string> {
-  return invoke("install_tokentracker_cli");
+/** 批量导入的一条待导入条目（仓库标签 + URL） */
+export interface SkillImportItem {
+  name: string;
+  url: string;
 }
 
-/** 启动 tracker serve（返回实际端口） */
-export function startTokentracker(): Promise<number> {
-  return invoke("start_tokentracker");
+/** 批量导入的单条结果 */
+export interface SkillBatchItemResult {
+  name: string;
+  url: string;
+  ok: boolean;
+  message: string;
+  plans: SkillImportPlan[];
+  commit?: string | null;
 }
 
-/** 停止 tracker serve */
-export function stopTokentracker(): Promise<string> {
-  return invoke("stop_tokentracker");
+/** 批量导入聚合报告 */
+export interface SkillBatchImportReport {
+  items: SkillBatchItemResult[];
+  applied: boolean;
+  okCount: number;
+  failedCount: number;
+  message: string;
 }
 
-/** 打开 TokenTracker 看板独立窗口 */
-export function openTokentrackerDashboard(): Promise<string> {
-  return invoke("open_tokentracker_dashboard");
+/** 批量导入多个仓库（apply=false 为只读预览；单条失败不中断其余） */
+export function skillImportBatch(
+  items: SkillImportItem[],
+  apply: boolean,
+): Promise<SkillBatchImportReport> {
+  return invoke("skill_import_batch", { items, apply });
+}
+
+/** 一个来源的检查结果（对应 Rust SourceCheck） */
+export interface SkillSourceCheck {
+  url: string;
+  recordedCommit?: string | null;
+  remoteCommit?: string | null;
+  commitChanged: boolean;
+  plans: SkillImportPlan[];
+  actionableCount: number;
+  localOnlyCount: number;
+  error?: string | null;
+}
+
+/** 全部来源的检查结果（对应 Rust UpdateCheckReport） */
+export interface SkillUpdateCheckReport {
+  sources: SkillSourceCheck[];
+  actionableTotal: number;
+  sourceCount: number;
+  message: string;
+}
+
+/** 检查已登记来源的更新（纯只读，永不自动写盘） */
+export function skillCheckUpdates(): Promise<SkillUpdateCheckReport> {
+  return invoke("skill_check_updates");
+}
+
+/** 应用某个来源的更新（需用户确认后调用） */
+export function skillApplyUpdate(url: string): Promise<SkillImportReport> {
+  return invoke("skill_apply_update", { url });
+}
+
+/** 一个已导入来源（对应 Rust SourceRecord） */
+export interface SkillSourceRecord {
+  /** 仓库标签（批量导入时填写，可为空则回退到 URL） */
+  name?: string | null;
+  url: string;
+  commit?: string | null;
+  importedAt: string;
+  checkedAt?: string | null;
+  lastUpdateCount: number;
+  skills: string[];
+}
+
+/** 技能来源注册表（对应 Rust SourceRegistry） */
+export interface SkillSourceRegistry {
+  schemaVersion: number;
+  sources: SkillSourceRecord[];
+}
+
+/** 读取来源注册表 */
+export function skillSources(): Promise<SkillSourceRegistry> {
+  return invoke("skill_sources");
+}
+
+/** 移除某个来源记录（只删元数据，不动技能文件） */
+export function skillForgetSource(url: string): Promise<void> {
+  return invoke("skill_forget_source", { url });
+}
+
+/** 打开结果（对应 Rust OpenReport） */
+export interface SkillOpenReport {
+  path: string;
+  via: "editor" | "system";
+  created: boolean;
+}
+
+/**
+ * 用外部程序打开受管文件。
+ *
+ * 二选一：`target` 是闭集枚举（"agents-md" | "context-md" | "skills-root"），
+ * 路径由 Rust 推导；`path` 是某个受管技能文件，由 Rust 校验其仍在受管根内。
+ * 前端**永远无法**让后端打开任意路径。
+ */
+export function skillOpen(
+  target: "agents-md" | "context-md" | "skills-root",
+): Promise<SkillOpenReport>;
+export function skillOpen(path: string): Promise<SkillOpenReport>;
+export function skillOpen(arg: string): Promise<SkillOpenReport> {
+  const isTarget =
+    arg === "agents-md" || arg === "context-md" || arg === "skills-root";
+  return invoke("skill_open", {
+    target: isTarget ? arg : null,
+    path: isTarget ? null : arg,
+  });
+}
+
+// ==================== MCP server 管理（ADR-0006） ====================
+
+/** MCP 变更事件名（对应 Rust MCP_CHANGED_EVENT） */
+export const MCP_CHANGED_EVENT = "mcp://changed";
+
+/** 订阅 MCP 变更事件 */
+export async function listenMcpChanged(
+  onChanged: () => void,
+): Promise<UnlistenFn> {
+  return listen(MCP_CHANGED_EVENT, () => {
+    onChanged();
+  });
+}
+
+/** MCP server 三态（对应 Rust McpState） */
+export type McpState = "missing" | "enabled" | "disabled";
+
+/** 声明来源（对应 Rust McpOrigin） */
+export type McpOrigin = "managed" | "external";
+
+/** 行级只读标记（对应 Rust McpMark） */
+export type McpMark = "expression" | "conflict" | "dangerous";
+
+/** transport（官方字段的两个取值） */
+export type McpTransport = "stdio" | "streamable-http";
+
+/** `list.reload`：由 profile 的 `patchReload` 决定 */
+export type McpReload = "live" | "requires-restart";
+
+/** 单个 MCP server 视图（对应 Rust McpServerView） */
+export interface McpServerView {
+  serverName: string;
+  rowId: string;
+  transport: McpTransport | null;
+  state: McpState;
+  origin: McpOrigin;
+  /** 来源层：dump 段标签（绝对路径 / bundle 包名） */
+  layer: string;
+  /** 只读摘要：stdio 取 command + args，streamable-http 取 url */
+  summary: string;
+  /** 有效 disabled；null = `!!js` 表达式（只读，启动器拒绝覆盖） */
+  disabled: boolean | null;
+  marks: McpMark[];
+}
+
+/** MCP 前置（`@deepseek-ai/dsh-mcp-client` 可解析性） */
+export interface McpPrereq {
+  installed: boolean;
+  package: string;
+}
+
+/** MCP 列表结果（对应 Rust McpListResult） */
+export interface McpListResult {
+  profile: string;
+  reload: McpReload;
+  prereq: McpPrereq;
+  servers: McpServerView[];
+}
+
+/** 新增 MCP server 的结构化入参（对应 Rust McpAddSpec） */
+export interface McpAddSpec {
+  serverName: string;
+  transport: McpTransport;
+  rowId?: string | null;
+  startDisabled?: boolean;
+  /** stdio */
+  command?: string | null;
+  args?: string[];
+  env?: [string, string][];
+  cwd?: string | null;
+  /** streamable-http */
+  url?: string | null;
+  headers?: [string, string][];
+  /** 共同可选项（官方字段名） */
+  toolCallTimeoutMs?: number | null;
+  reconnectEnabled?: boolean | null;
+  reconnectInitialDelayMs?: number | null;
+  reconnectMaxDelayMs?: number | null;
+  reconnectMaxAttempts?: number | null;
+  /**
+   * 原始通道：官方 config 体的原始 YAML 片段（与结构化字段互斥）。
+   * 用于 `!!js` / 注释 / 暂未建模的官方字段透传。
+   */
+  rawConfig?: string | null;
+}
+
+/** MCP 操作结果（`restarted` 恒为 false：MCP 变更不重启 dsh） */
+export interface McpOpResult {
+  status: "changed" | "unchanged";
+  restarted: boolean;
+  message: string;
+  serverName: string | null;
+}
+
+/** 列出合成树全量 MCP server */
+export function mcpList(): Promise<McpListResult> {
+  return invoke("mcp_list");
+}
+
+/** 新增 MCP server（写机器级受管 MCP 区块） */
+export function mcpAdd(spec: McpAddSpec): Promise<McpOpResult> {
+  return invoke("mcp_add", { spec });
+}
+
+/** 删除 MCP server（managed 真删除；external 仅撤销定向覆盖） */
+export function mcpRemove(serverName: string): Promise<McpOpResult> {
+  return invoke("mcp_remove", { serverName });
+}
+
+/** 启用/禁用 MCP server（只写定向行，config 绝不重渲染） */
+export function mcpSetState(
+  serverName: string,
+  enabled: boolean,
+): Promise<McpOpResult> {
+  return invoke("mcp_set_state", { serverName, enabled });
 }

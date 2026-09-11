@@ -18,7 +18,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import StatusCard from "@/components/StatusCard";
-import TokenPanel from "@/components/TokenPanel";
 import VersionPanel from "@/components/VersionPanel";
 import LogPanel from "@/components/LogPanel";
 import WindowControls from "@/components/WindowControls";
@@ -38,24 +37,26 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
+  Plug,
   Puzzle,
   Settings as SettingsIcon,
   Sparkles,
   X,
 } from "lucide-react";
 
-/** 底部管理入口（顺序固定：插件 | 技能 | 设置，见 ADR-0005 D11） */
-export type ShellPanel = "plugins" | "skills" | "settings";
+/** 底部管理入口（顺序固定：MCP | 插件 | 技能 | 设置，见 ADR-0006 D14） */
+export type ShellPanel = "mcp" | "plugins" | "skills" | "settings";
 
-/** 底部三按钮入口定义（顺序即渲染顺序） */
+/** 底部四按钮入口定义（顺序即渲染顺序，MCP 最左） */
 const PANEL_ENTRIES: {
   key: ShellPanel;
   label: string;
   title: string;
   Icon: typeof Puzzle;
 }[] = [
+  { key: "mcp", label: "MCP", title: "MCP server 管理", Icon: Plug },
   { key: "plugins", label: "插件", title: "插件管理", Icon: Puzzle },
-  { key: "skills", label: "技能", title: "技能共享", Icon: Sparkles },
+  { key: "skills", label: "技能", title: "技能管理", Icon: Sparkles },
   { key: "settings", label: "设置", title: "打开设置", Icon: SettingsIcon },
 ];
 
@@ -68,11 +69,7 @@ interface AppShellProps {
   onOpenPanel: (panel: ShellPanel) => void;
 }
 
-/** 主内容区 Tab：版本管理 / Token 统计 */
-type MainTab = "versions" | "tokens";
-
 export default function AppShell({ version, activePanel, onOpenPanel }: AppShellProps) {
-  const [mainTab, setMainTab] = useState<MainTab>("versions");
   // 面板展开/收起状态（与宽度值分离：宽度持久化于 localStorage）
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -158,9 +155,16 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sidebarOpen]);
 
-  // 进入移动端自动收起侧栏（drawer 默认收起）
+  // 进入移动端（≤640px）自动收起侧栏**与右栏**（两者在该档位都是全屏遮罩）。
+  //
+  // ADR-0009 D8：此前只收侧栏，而 `rightOpen` 初值为 true、且 ≤640px 的
+  // `.right-panel-container.right-panel-open` 是 `inset:0` 全屏 overlay（z-index 270）
+  // → 窄窗口首屏「日志面板全屏盖住主内容」，用户必须先点遮罩才能看到版本管理。
   useEffect(() => {
-    if (isMobile) setSidebarOpen(false);
+    if (isMobile) {
+      setSidebarOpen(false);
+      setRightOpen(false);
+    }
   }, [isMobile]);
 
   // 视口缩到紧凑档（641~959px）自动收起右栏（该档位不参与 split 布局）
@@ -207,7 +211,7 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
             {/* 标题已移至主内容区（titlebar），侧栏不再含标题/描述 */}
             <div className="sidebar-body">
               <StatusCard />
-              {/* 底部：管理入口按钮组（插件 | 技能 | 设置），分割线分隔 */}
+              {/* 底部：管理入口按钮组（MCP | 插件 | 技能 | 设置），分割线分隔 */}
               <div className="mt-auto flex flex-col pt-4">
                 <Separator className="mb-3" />
                 <div
@@ -225,10 +229,11 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
                         onClick={() => onOpenPanel(key)}
                         title={title}
                         aria-pressed={active}
-                        className="flex-1 px-1"
+                        className="min-w-0 flex-1 px-1"
                       >
                         <Icon className="size-3.5" />
-                        {label}
+                        {/* 标签：侧栏被拖窄时由容器查询自动隐藏（见 index.css .panel-entry-label） */}
+                        <span className="panel-entry-label truncate">{label}</span>
                       </Button>
                     );
                   })}
@@ -260,6 +265,8 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
             size="icon-sm"
             onClick={() => setSidebarOpen(!sidebarOpen)}
             title={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-label={sidebarOpen ? "收起左侧栏" : "展开左侧栏"}
+            aria-expanded={sidebarOpen}
             className="shrink-0"
           >
             {sidebarOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
@@ -279,45 +286,18 @@ export default function AppShell({ version, activePanel, onOpenPanel }: AppShell
               size="icon-sm"
               onClick={() => setRightOpen(!rightOpen)}
               title={rightOpen ? "收起日志" : "展开日志"}
+              aria-label={rightOpen ? "收起日志面板" : "展开日志面板"}
+              aria-expanded={rightOpen}
             >
               {rightOpen ? <X className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
             </Button>
           </div>
         </header>
 
-        {/* 内容行：主区（版本管理 / Token 统计 Tab），自动占满剩余空间 */}
+        {/* 内容行：主区（版本管理），自动占满剩余空间 */}
         <div className="app-content">
           <main className="app-main">
-            {/* 主区 Tab 切换条 */}
-            <div className="flex items-center gap-1 border-b px-3 pt-2" role="tablist" aria-label="主区切换">
-              <Button
-                size="sm"
-                variant={mainTab === "versions" ? "default" : "ghost"}
-                role="tab"
-                aria-selected={mainTab === "versions"}
-                onClick={() => setMainTab("versions")}
-              >
-                版本管理
-              </Button>
-              <Button
-                size="sm"
-                variant={mainTab === "tokens" ? "default" : "ghost"}
-                role="tab"
-                aria-selected={mainTab === "tokens"}
-                onClick={() => setMainTab("tokens")}
-              >
-                Token 统计
-              </Button>
-            </div>
-            <div className="min-h-0 flex-1">
-              {/* 双面板常驻挂载：Tab 切换仅显隐，避免切回时重新加载（版本列表/看板状态保留） */}
-              <div className={mainTab === "versions" ? "h-full" : "hidden"}>
-                <VersionPanel />
-              </div>
-              <div className={mainTab === "tokens" ? "h-full" : "hidden"}>
-                <TokenPanel />
-              </div>
-            </div>
+            <VersionPanel />
           </main>
         </div>
       </div>

@@ -1,6 +1,6 @@
 [package]
 name = "dsh-launcher"
-version = "0.6.2"
+version = "0.9.0"
 description = "deepseek-harness 启动器与运行环境管理器"
 authors = ["dsh-launcher"]
 edition = "2021"
@@ -26,10 +26,21 @@ encoding_rs = "0.8"
 [target.'cfg(windows)'.dependencies]
 # Windows 原生 API：设置任务栏大图标（ICON_BIG，RGBA→CreateIcon，修复内嵌窗口任务栏图标模糊）
 # + 注册表/环境变量/代码页 + DPAPI（GitHub Token 落盘加密，审计修复 2.4）
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Environment", "Win32_System_Console", "Win32_Globalization", "Win32_Security_Cryptography"] }
+# + Win32_UI_Shell 的 ShellExecuteW（ADR-0008：用系统默认关联程序打开文件）
+#
+# 为何用 ShellExecuteW 而不是 `tauri_plugin_opener`：后者（经 tao/wry）会把整个 GUI
+# DLL 栈（user32/gdi32/comctl32/dwmapi/shcore/uxtheme…）链入**库**。这会让
+# `cargo test --lib` 的 unittest 二进制变成一个 GUI 程序：它没有 side-by-side
+# manifest，加载到 v5 的 comctl32.dll，缺少链接期解析的导出 →
+# `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)`，测试二进制根本无法启动。
+# ShellExecuteW 只依赖 shell32，语义完全一致（`open` 动词 = 系统关联程序），
+# 且 `windows` crate 本就已是依赖，不新增任何东西。
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_Environment", "Win32_System_Console", "Win32_Globalization", "Win32_Security_Cryptography"] }
 
-[dev-dependencies]
-tokio = { version = "1", features = ["rt", "time", "macros"] }
+# 注：`tokio` 曾作为 dev-dependency 存在，仅服务于已被移除的
+# `concurrency_test.rs`（它测的是 tokio 运行时行为，而非本产品逻辑）。
+# ADR-0009 D11d 重写该测试为直测 `ProcessManager` 后，`src/` 与 `tests/` 均不再使用
+# tokio（应用用 Tauri 自带 async 运行时），故按 D19 一并移除该未使用依赖。
 # 窗口图标回归测试（tests/icon_window_test.rs）需 CreateIcon/GetIconInfo（GDI）
 [target.'cfg(windows)'.dev-dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Environment", "Win32_Globalization"] }

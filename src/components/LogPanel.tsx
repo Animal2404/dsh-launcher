@@ -9,6 +9,7 @@
 // - L9：导出 blob URL 延迟回收；文件名路径分隔符统一清洗；
 // - L7：移除无调用方的 onClose prop。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { listLogs, readLog, type LogFile } from "@/lib/tauri";
@@ -79,33 +80,18 @@ export default function LogPanel({ className }: { className?: string }) {
   const stickToTopRef = useRef(true);
 
   // 订阅 Rust 日志事件（实时流，最新条目在最前）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    (async () => {
-      try {
-        const u = await listen<LogLine>("log://line", (event) => {
-          setEntries((prev) => {
-            const next = [toEntry(event.payload), ...prev];
-            return next.length > MAX_STREAM_LINES
-              ? next.slice(0, MAX_STREAM_LINES)
-              : next;
-          });
-        });
-        if (cancelled) {
-          u();
-        } else {
-          unlisten = u;
-        }
-      } catch (e) {
-        console.error("订阅日志事件失败", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
+  // 统一走 useTauriEvent（ADR-0009 D7）：本处原为全仓唯一写对的实现，
+  // 现抽出为共用封装，此处改为调用它（行为等价：竞态安全 + 不吞错误）
+  useTauriEvent<LogLine>(
+    (onPayload) => listen<LogLine>("log://line", (event) => onPayload(event.payload)),
+    (payload) => {
+      setEntries((prev) => {
+        const next = [toEntry(payload), ...prev];
+        return next.length > MAX_STREAM_LINES ? next.slice(0, MAX_STREAM_LINES) : next;
+      });
+    },
+    [],
+  );
 
   // 滚动位置跟踪：靠近顶部（最新）视为"贴顶"
   useEffect(() => {
@@ -169,6 +155,27 @@ export default function LogPanel({ className }: { className?: string }) {
     }
   }, []);
 
+  // 文件读取的单调序号守卫（ADR-0009 D10）。
+  //
+  // 症状：`setSelected(path); setContent(await readLog(path))` 无守卫时，快速连点两个文件会
+  // 让**先发起但更慢**的 readLog 结果覆盖后选文件的内容 —— 标题显示 A、正文是 B。
+  // 修法：每次发起读取前自增序号；await 返回后只在「序号仍是最新」时落 state，
+  // 过期结果直接丢弃。`refreshFiles` 的自动选中走同一条路径，因此共用同一守卫。
+  const readSeqRef = useRef(0);
+
+  /** 读取并展示某个日志文件；过期结果不落 state */
+  const loadLogContent = useCallback(async (path: string) => {
+    const seq = ++readSeqRef.current;
+    try {
+      const text = await readLog(path);
+      if (seq !== readSeqRef.current) return; // 已有更新的选择，丢弃本次结果
+      setContent(text);
+    } catch (e) {
+      if (seq !== readSeqRef.current) return;
+      toast.error(`读取日志失败: ${e}`);
+    }
+  }, []);
+
   // 文件列表刷新（最新文件优先选中展示）
   const refreshFiles = useCallback(async () => {
     try {
@@ -177,12 +184,12 @@ export default function LogPanel({ className }: { className?: string }) {
       if (files.length > 0 && !selected) {
         const first = files[0];
         setSelected(first.path);
-        setContent(await readLog(first.path));
+        await loadLogContent(first.path);
       }
     } catch (e) {
       console.error("读取日志列表失败", e);
     }
-  }, [selected]);
+  }, [selected, loadLogContent]);
 
   // 让 30s 轮询始终调用最新的 refreshFiles（避免因 selected 变化反复重建定时器）
   const refreshRef = useRef(refreshFiles);
@@ -201,11 +208,8 @@ export default function LogPanel({ className }: { className?: string }) {
   async function selectLog(path: string) {
     setLiveMode(false);
     setSelected(path);
-    try {
-      setContent(await readLog(path));
-    } catch (e) {
-      toast.error(`读取日志失败: ${e}`);
-    }
+    // 经序号守卫读取：快速连点多个文件时，过期结果不会覆盖后选文件（ADR-0009 D10）
+    await loadLogContent(path);
   }
 
   function exportLog() {
@@ -263,10 +267,22 @@ export default function LogPanel({ className }: { className?: string }) {
         </div>
         <div className="flex items-center gap-1">
           {/* 清屏（清空实时流缓冲，文件列表仍由定时器自动刷新） */}
-          <Button variant="ghost" size="icon-sm" onClick={clearLog} title="清屏">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={clearLog}
+            title="清屏"
+            aria-label="清空日志流"
+          >
             <Eraser />
           </Button>
-          <Button variant="ghost" size="icon-sm" onClick={exportLog} title="导出日志">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={exportLog}
+            title="导出日志"
+            aria-label="导出日志"
+          >
             <Download />
           </Button>
         </div>
@@ -274,14 +290,14 @@ export default function LogPanel({ className }: { className?: string }) {
 
       {/* 内容区（一体化侧边栏：无背景色、无描边；右侧不留 padding，滚动条紧贴右缘） */}
       <div className="flex min-h-0 flex-1 gap-3 pl-4 pt-1 pb-2">
-        {/* 日志文件列表（非实时流时显示） */}
+        {/* 日志文件列表（非实时流时显示）：入场淡入，回答"视图切换了" */}
         {!liveMode && (
-          <div className="w-36 shrink-0 space-y-1">
+          <div className="dsh-fade-in w-36 shrink-0 space-y-1">
             {logs.map((f) => (
               <button
                 key={f.path}
                 onClick={() => selectLog(f.path)}
-                className={`w-full truncate rounded px-2 py-1 text-left text-xs transition-colors ${
+                className={`w-full truncate rounded px-2 py-1 text-left text-xs transition-colors duration-150 ${
                   selected === f.path
                     ? "bg-primary text-primary-foreground"
                     : "hover:bg-muted"

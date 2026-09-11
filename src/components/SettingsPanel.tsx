@@ -134,139 +134,146 @@ export default function SettingsPanel() {
           恒以弹出对话框（App.tsx）形态使用，非 embedded 形态无调用方（死代码）。 */}
       {installedVersion && (
         <div className="text-xs text-muted-foreground">
-          dsh {installedVersion}
+          已安装 dsh <span className="font-medium text-foreground">{installedVersion}</span>
         </div>
       )}
-        {/* 镜像源 */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">镜像源</h3>
-          <div className="grid gap-2">
-            <Label htmlFor="npm" className="text-xs">npm registry</Label>
-            <div className="flex gap-1.5">
-              <Input
-                id="npm"
-                value={npmRegistry}
-                onChange={(e) => setNpmRegistry(e.target.value)}
-                placeholder="https://registry.npmjs.org"
-                className="text-xs"
-              />
-              <select
-                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
-                onChange={(e) => setNpmRegistry(e.target.value)}
-                value={PRESETS.npm.some((p) => p.value === npmRegistry) ? npmRegistry : ""}
-              >
-                {PRESETS.npm.map((p) => (
-                  <option key={p.label} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
 
-            <Label htmlFor="gh" className="text-xs">GitHub 加速</Label>
-            <div className="flex gap-1.5">
-              <Input
-                id="gh"
-                value={githubMirror}
-                onChange={(e) => setGithubMirror(e.target.value)}
-                placeholder="https://ghproxy.com"
-                className="text-xs"
-              />
-              <select
-                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
-                onChange={(e) => setGithubMirror(e.target.value)}
-                value={PRESETS.github.some((p) => p.value === githubMirror) ? githubMirror : ""}
-              >
-                {PRESETS.github.map((p) => (
-                  <option key={p.label} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <Label htmlFor="node" className="text-xs">Node 镜像</Label>
-            <div className="flex gap-1.5">
-              <Input
-                id="node"
-                value={nodeMirror}
-                onChange={(e) => setNodeMirror(e.target.value)}
-                placeholder="https://nodejs.org/dist"
-                className="text-xs"
-              />
-              <select
-                className="w-32 shrink-0 rounded-md border bg-background px-1.5 text-xs"
-                onChange={(e) => setNodeMirror(e.target.value)}
-                value={PRESETS.node.some((p) => p.value === nodeMirror) ? nodeMirror : ""}
-              >
-                {PRESETS.node.map((p) => (
-                  <option key={p.label} value={p.value}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <Button variant="secondary" size="sm" onClick={saveMirrors}>
-              保存镜像源
-            </Button>
-          </div>
-        </div>
-
-        <Separator />
-
-        {/* GitHub Token：防 API 限流 / git 认证增强 */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">GitHub Token</h3>
-          <div className="grid gap-1.5">
+      {/* 镜像源：三行「输入 + 预设」，窄宽度下预设下拉自动换行到下一行 */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">镜像源</h3>
+        <div className="grid gap-2">
+          <Label htmlFor="npm" className="text-xs">npm registry</Label>
+          <div className="flex flex-wrap gap-1.5">
             <Input
-              type="password"
-              value={githubToken}
-              onChange={(e) => setGithubTokenState(e.target.value)}
-              placeholder={
-                tokenSet
-                  ? "已保存（输入新值覆盖；留空保持不变）"
-                  : "ghp_xxx（Personal Access Token，可选）"
-              }
-              className="text-xs"
+              id="npm"
+              value={npmRegistry}
+              onChange={(e) => setNpmRegistry(e.target.value)}
+              placeholder="https://registry.npmjs.org"
+              className="min-w-[12rem] flex-1 text-xs"
             />
-            <p className="text-[11px] text-muted-foreground">
-              用于 git 认证增强，避免 GitHub API/克隆限流；留空为匿名访问
-              {tokenSet && "（已保存，出于安全不回显）"}
-            </p>
-            <Button variant="secondary" size="sm" onClick={saveToken}>
-              保存 Token
-            </Button>
+            <select
+              className="dsh-select w-32 shrink-0"
+              onChange={(e) => setNpmRegistry(e.target.value)}
+              value={PRESETS.npm.some((p) => p.value === npmRegistry) ? npmRegistry : ""}
+              title="npm 镜像预设"
+            >
+              {PRESETS.npm.map((p) => (
+                <option key={p.label} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
 
-        <Separator />
-
-        {/* 滑动开关：两列排布，描述简化 */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-medium">窗口与运行行为</h3>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-            {(
-              [
-                ["closeExits", "关闭直接退出"],
-                ["minimizeToTray", "最小化到托盘"],
-                ["keepDshOnExit", "退出驻留 dsh"],
-                ["keepDshHomeOnUninstall", "卸载保留数据"],
-                ["autoStartDsh", "启动时自动启动"],
-                ["autoOpenBrowser", "启动时打开浏览器"],
-                ["autoSyncPlugins", "自动同步上游插件"],
-              ] as const
-            ).map(([key, label]) => (
-              <div key={key} className="flex items-center justify-between gap-2">
-                <span className="text-xs">{label}</span>
-                <Switch
-                  size="sm"
-                  checked={switches[key]}
-                  onCheckedChange={(v) => toggleSwitch(key, v === true)}
-                />
-              </div>
-            ))}
+          <Label htmlFor="gh" className="text-xs">GitHub 加速</Label>
+          <div className="flex flex-wrap gap-1.5">
+            <Input
+              id="gh"
+              value={githubMirror}
+              onChange={(e) => setGithubMirror(e.target.value)}
+              placeholder="https://ghproxy.com"
+              className="min-w-[12rem] flex-1 text-xs"
+            />
+            <select
+              className="dsh-select w-32 shrink-0"
+              onChange={(e) => setGithubMirror(e.target.value)}
+              value={PRESETS.github.some((p) => p.value === githubMirror) ? githubMirror : ""}
+              title="GitHub 加速预设"
+            >
+              {PRESETS.github.map((p) => (
+                <option key={p.label} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
           </div>
+
+          <Label htmlFor="node" className="text-xs">Node 镜像</Label>
+          <div className="flex flex-wrap gap-1.5">
+            <Input
+              id="node"
+              value={nodeMirror}
+              onChange={(e) => setNodeMirror(e.target.value)}
+              placeholder="https://nodejs.org/dist"
+              className="min-w-[12rem] flex-1 text-xs"
+            />
+            <select
+              className="dsh-select w-32 shrink-0"
+              onChange={(e) => setNodeMirror(e.target.value)}
+              value={PRESETS.node.some((p) => p.value === nodeMirror) ? nodeMirror : ""}
+              title="Node 镜像预设"
+            >
+              {PRESETS.node.map((p) => (
+                <option key={p.label} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button variant="secondary" size="sm" className="mt-1 self-start" onClick={saveMirrors}>
+            保存镜像源
+          </Button>
         </div>
+      </div>
+
+      <Separator />
+
+      {/* GitHub Token：防 API 限流 / git 认证增强 */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">GitHub Token</h3>
+        <div className="grid gap-1.5">
+          <Input
+            type="password"
+            value={githubToken}
+            onChange={(e) => setGithubTokenState(e.target.value)}
+            placeholder={
+              tokenSet
+                ? "已保存（输入新值覆盖；留空保持不变）"
+                : "ghp_xxx（Personal Access Token，可选）"
+            }
+            className="text-xs"
+          />
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            用于 git 认证增强，避免 GitHub API/克隆限流；留空为匿名访问
+            {tokenSet && "（已保存，出于安全不回显）"}
+          </p>
+          <Button variant="secondary" size="sm" className="self-start" onClick={saveToken}>
+            保存 Token
+          </Button>
+        </div>
+      </div>
+
+      <Separator />
+
+      {/* 滑动开关：宽屏两列 / 窄屏单列，描述简化 */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">窗口与运行行为</h3>
+        <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+          {(
+            [
+              ["closeExits", "关闭直接退出"],
+              ["minimizeToTray", "最小化到托盘"],
+              ["keepDshOnExit", "退出驻留 dsh"],
+              ["keepDshHomeOnUninstall", "卸载保留数据"],
+              ["autoStartDsh", "启动时自动启动"],
+              ["autoOpenBrowser", "启动时打开浏览器"],
+              ["autoSyncPlugins", "自动同步上游插件"],
+            ] as const
+          ).map(([key, label]) => (
+            <div
+              key={key}
+              className="flex items-center justify-between gap-2 rounded-md border border-transparent px-2 py-1.5 transition-colors hover:border-border/60 hover:bg-muted/40"
+            >
+              <span className="text-xs">{label}</span>
+              <Switch
+                size="sm"
+                checked={switches[key]}
+                onCheckedChange={(v) => toggleSwitch(key, v === true)}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

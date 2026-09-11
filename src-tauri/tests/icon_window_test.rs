@@ -15,16 +15,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// RGBA → CreateIcon（tao from_rgba 同款：BGRA + alpha 反转 AND mask）
-/// 与 commands/dsh.rs::ensure_big_hicon 的像素转换完全同源（Windows CreateIcon 固定格式），
-/// 此处为集成测试独立复刻以验证真实窗口链路；若改格式两侧需同步。
+///
+/// ADR-0009 D11c：像素转换**直调生产函数** `rgba_to_bgra_and_mask`
+/// （位于 `commands::dsh`，已 `pub(crate)` 导出）。此前本测试在文件内**独立复刻**了一份
+/// 转换逻辑，若生产实现被改坏（通道顺序/mask 取反写错），本测试仍会通过 —— 无回归价值。
+/// 现两条路径共用同一实现，格式变更不再需要"两侧同步"。
 fn create_icon_from_rgba(rgba: &[u8], width: u32, height: u32) -> windows::Win32::UI::WindowsAndMessaging::HICON {
-    let pixel_count = (width * height) as usize;
-    let mut bgra = Vec::with_capacity(rgba.len());
-    let mut and_mask = Vec::with_capacity(pixel_count);
-    for px in rgba.chunks_exact(4) {
-        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        and_mask.push(px[3].wrapping_sub(u8::MAX));
-    }
+    let (bgra, and_mask) = dsh_launcher_lib::commands::dsh::rgba_to_bgra_and_mask(rgba, width, height);
     unsafe {
         CreateIcon(None, width as i32, height as i32, 1, 32, and_mask.as_ptr(), bgra.as_ptr())
             .expect("CreateIcon")

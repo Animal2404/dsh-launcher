@@ -16,7 +16,7 @@
 use crate::core::logging::{LogLevel, LogSource};
 use crate::core::process::DshStatus;
 use crate::AppState;
-use tauri::{Manager, State};
+use tauri::State;
 
 /// 为窗口设置高清窗口图标（标题栏小图标 + 任务栏大图标）
 ///
@@ -96,13 +96,10 @@ fn ensure_big_hicon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, 
     let (w, h) = (img.width() as i32, img.height() as i32);
     let rgba = img.rgba();
 
-    // 转 BGRA 并构造 AND mask（alpha 反转），与 tao RgbaIcon::into_windows_icon 相同
-    let mut bgra = Vec::with_capacity(rgba.len());
-    let mut and_mask = Vec::with_capacity((w * h) as usize);
-    for px in rgba.chunks_exact(4) {
-        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        and_mask.push(px[3].wrapping_sub(u8::MAX));
-    }
+    // 转 BGRA 并构造 AND mask（alpha 反转），与 tao RgbaIcon::into_windows_icon 相同。
+    // 该像素转换抽为**生产纯函数** `rgba_to_bgra_and_mask`，使其可被单测直接覆盖
+    // （ADR-0009 D11c：此前只有测试文件内的复刻版本，生产实现的回归无人守护）。
+    let (bgra, and_mask) = rgba_to_bgra_and_mask(rgba, w as u32, h as u32);
 
     // SAFETY: bgra/and_mask 为合法 BGRA/AND mask 缓冲（长度 = w*h*4 / w*h），
     // CreateIcon 同步复制数据后返回独立 HICON；调用方（缓存）负责其生命周期
@@ -114,20 +111,25 @@ fn ensure_big_hicon() -> Result<windows::Win32::UI::WindowsAndMessaging::HICON, 
     Ok(hicon)
 }
 
-/// 为内嵌 Web GUI 窗口设置高清任务栏图标（前端创建的窗口创建完成后调用）
-#[tauri::command]
-pub fn set_web_gui_icon(app: tauri::AppHandle, label: String) -> Result<(), String> {
-    let Some(win) = app.get_webview_window(&label) else {
-        return Err(format!("窗口 {label} 不存在"));
-    };
-    apply_window_icon(&win).inspect_err(|e| {
-        // v0.4.15（审计修复）：图标失败不再静默（release 无控制台，stderr 不可见）
-        if let Some(state) = app.try_state::<AppState>() {
-            state
-                .logger
-                .log(LogSource::Launcher, LogLevel::Warn, &format!("设置内嵌窗口 {label} 图标失败: {e}"));
-        }
-    })
+/// RGBA → (BGRA 缓冲, AND mask 缓冲)：`CreateIcon` 要求的像素布局。
+///
+/// 与 tao 的 `RgbaIcon::into_windows_icon` 同款转换：
+/// - BGRA：把每像素的 R/B 交换（Windows DIB 为 BGRA 顺序）；
+/// - AND mask：按位取反后的 alpha（`alpha - 255` 的 wrapping 减法），
+///   全透明像素在 mask 中置 1（"打洞"），供不支持 alpha 的场景使用。
+///
+/// 抽为纯函数（不触碰 Win32）以便直接单测与集成测试复用：这是任务栏图标清晰度的关键路径，
+/// 一旦通道顺序或 mask 取反写错，图标会显示为颜色错乱/全黑或全透明。
+#[cfg(windows)]
+pub fn rgba_to_bgra_and_mask(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>) {
+    let pixel_count = (width as usize) * (height as usize);
+    let mut bgra = Vec::with_capacity(pixel_count * 4);
+    let mut and_mask = Vec::with_capacity(pixel_count);
+    for px in rgba.chunks_exact(4) {
+        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        and_mask.push(px[3].wrapping_sub(u8::MAX));
+    }
+    (bgra, and_mask)
 }
 
 /// 创建内嵌 Web GUI 窗口（统一实现；被桌面快捷方式/自动打开/前端"内嵌打开"共用）
@@ -454,4 +456,64 @@ pub async fn restart_dsh(state: State<'_, AppState>) -> Result<String, String> {
     })
     .await
     .map_err(|e| format!("任务执行失败: {e}"))?
+}
+
+#[cfg(all(test, windows))]
+mod icon_pixel_tests {
+    use super::rgba_to_bgra_and_mask;
+
+    /// 单个不透明红色像素：RGBA(255,0,0,255) → BGRA(0,0,255,255)，mask = 255-255 = 0
+    #[test]
+    fn 单个不透明像素_rb_交换且_mask_为_0() {
+        let (bgra, mask) = rgba_to_bgra_and_mask(&[255, 0, 0, 255], 1, 1);
+        assert_eq!(bgra, vec![0, 0, 255, 255], "R/B 必须交换（Windows 为 BGRA）");
+        assert_eq!(mask, vec![0], "不透明像素的 AND mask 必须为 0（不透明）");
+    }
+
+    /// 单个全透明像素：RGBA(10,20,30,0) → BGRA(30,20,10,0)，mask = 0-255 回绕 = 1
+    #[test]
+    fn 全透明像素_mask_回绕为_1() {
+        let (bgra, mask) = rgba_to_bgra_and_mask(&[10, 20, 30, 0], 1, 1);
+        assert_eq!(bgra, vec![30, 20, 10, 0], "alpha 保持在第 4 字节");
+        assert_eq!(mask, vec![1], "alpha=0 时 0-255 回绕得 1（mask 置位=打洞）");
+    }
+
+    /// 半透明像素：alpha=128 → mask = 128-255 回绕 = 129
+    #[test]
+    fn 半透明像素_mask_按_wrapping_减法() {
+        let (_, mask) = rgba_to_bgra_and_mask(&[1, 2, 3, 128], 1, 1);
+        assert_eq!(mask, vec![129], "128u8.wrapping_sub(255) = 129");
+    }
+
+    /// 缓冲长度契约：BGRA = 像素数×4、mask = 像素数（CreateIcon 依赖该长度）
+    #[test]
+    fn 缓冲长度与像素数一致() {
+        let w = 4u32;
+        let h = 3u32;
+        let rgba: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 256) as u8).collect();
+        let (bgra, mask) = rgba_to_bgra_and_mask(&rgba, w, h);
+        assert_eq!(bgra.len(), (w * h * 4) as usize, "BGRA 长度 = 像素数 × 4");
+        assert_eq!(mask.len(), (w * h) as usize, "mask 长度 = 像素数");
+    }
+
+    /// 多像素顺序：逐像素独立转换，不得错位
+    #[test]
+    fn 多像素逐字节顺序正确() {
+        // 两个像素：红(255,0,0,255) 与 蓝(0,0,255,255)
+        let (bgra, mask) = rgba_to_bgra_and_mask(&[255, 0, 0, 255, 0, 0, 255, 255], 2, 1);
+        assert_eq!(
+            bgra,
+            vec![0, 0, 255, 255, 255, 0, 0, 255],
+            "像素顺序必须保持（红→BGRA、蓝→BGRA）"
+        );
+        assert_eq!(mask, vec![0, 0], "两个不透明像素 mask 均为 0");
+    }
+
+    /// 空输入不 panic（防御性：宽度或高度为 0）
+    #[test]
+    fn 空输入返回空缓冲() {
+        let (bgra, mask) = rgba_to_bgra_and_mask(&[], 0, 0);
+        assert!(bgra.is_empty());
+        assert!(mask.is_empty());
+    }
 }

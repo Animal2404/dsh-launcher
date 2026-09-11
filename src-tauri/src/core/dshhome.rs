@@ -7,6 +7,16 @@
 //!
 //! 启动器不设置 `DSH_HOME`，子进程继承同一环境，因此双方解析结果一致；
 //! 所有需要 DSH_HOME 的模块必须调用本模块，禁止各自拼路径。
+//!
+//! **官方扫描根常量集中在本模块**（ADR-0006 R13 / D17），每处都标注官方出处，
+//! 便于随上游版本核对：
+//!
+//! | 资源 | 路径 | 官方出处 |
+//! |---|---|---|
+//! | 技能（官方根，rank 500） | `<agentsHome>/skills` | `packages/skill/skill-filesystem/src/index.ts:40,254` |
+//! | 技能（dsh home 根，rank 400） | `<dshHome>/skills` | 同上 `:253` |
+//! | 用户全局指令 | `<dshHome>/AGENTS.md` | `packages/context/agent-instructions/src/files.ts:285-291`、`render.ts:98,106` |
+//! | 共享 agent 根 | `<agentsHome>`（默认 `~/.agents`） | `skill-filesystem/src/index.ts:164` |
 
 use std::path::{Path, PathBuf};
 
@@ -22,8 +32,12 @@ pub const MANAGED_PROFILE: &str = "web";
 pub const PROFILE_PATCH_FILENAME: &str = "cordis.patch.yml";
 /// home 级用户 patch 层文件名
 pub const HOME_PATCH_FILENAME: &str = "cordis.patch.yml";
-/// 共享 agent 目录名（`<agentsHome>/agent`）
-pub const SHARED_AGENT_DIR: &str = "agent";
+/// 技能目录名（官方两个技能根都叫 `skills`）
+pub const SKILLS_DIR: &str = "skills";
+/// 用户全局指令文件名（官方固定读 `<dshHome>/AGENTS.md`）
+pub const AGENTS_MD_FILENAME: &str = "AGENTS.md";
+/// 词表文件名（**dsh 不读**：全仓无引用，仅 agent/技能侧约定资源）
+pub const CONTEXT_MD_FILENAME: &str = "CONTEXT.md";
 
 /// 操作系统用户目录（`USERPROFILE` 优先，兼容 `HOME`）。
 pub fn user_home() -> PathBuf {
@@ -72,13 +86,50 @@ pub fn agents_home() -> PathBuf {
     resolve_agents_home(configured.as_deref(), &user_home())
 }
 
-/// 共享资源真源目录：`<agentsHome>/agent`。
+/// 共享资源真源根 = **官方 `agentsHome` 根**（默认 `~/.agents`）。
 ///
-/// dsh 侧 `skill-filesystem.agentsHome` 的语义是"技能根 = `<agentsHome>/skills`"，
-/// 因此共享真源必须落在 `<agentsHome>/agent`，其 `skills/` 才等于
-/// `<agentsHome>/agent/skills`。
+/// 官方语义（`skill-filesystem/src/index.ts:164,254`）：
+/// `agentsHome` 是**共享 agent 配置根**，其下的 `skills/` 才是 `user-agents`
+/// 技能根（rank 500）。因此共享真源就是 `agentsHome` 本身，**不是** `agentsHome/agent`
+/// —— 后者既非官方扫描根、又会让 `<agentsHome>/agent/skills` 落空（ADR-0006 D17）。
 pub fn shared_agent_dir() -> PathBuf {
-    agents_home().join(SHARED_AGENT_DIR)
+    agents_home()
+}
+
+/// 官方技能根（`user-agents`，rank 500）：`<agentsHome>/skills`。
+///
+/// 见 `packages/skill/skill-filesystem/src/index.ts:40,254`。这是启动器的
+/// **技能共享真源**；因为 rank 500 原生覆盖，技能**不需要任何链接**。
+pub fn agents_skills_dir() -> PathBuf {
+    agents_home().join(SKILLS_DIR)
+}
+
+/// 官方 dsh-home 技能根（`user-dsh`，rank 400）：`<dshHome>/skills`。
+///
+/// 见 `packages/skill/skill-filesystem/src/index.ts:253`（带 `skipSystem`）。
+pub fn dsh_home_skills_dir() -> PathBuf {
+    dsh_home().join(SKILLS_DIR)
+}
+
+/// 官方用户全局指令文件：**固定**为 `<dshHome>/AGENTS.md`。
+///
+/// 见 `packages/context/agent-instructions/src/files.ts:285-291` 与
+/// `render.ts:98,106`（`USER_GLOBAL_FILE`/`USER_GLOBAL_DIRECTORY`）。
+pub fn dsh_home_agents_md() -> PathBuf {
+    dsh_home().join(AGENTS_MD_FILENAME)
+}
+
+/// 共享真源侧的指令文件：`<agentsHome>/AGENTS.md`。
+pub fn agents_home_agents_md() -> PathBuf {
+    agents_home().join(AGENTS_MD_FILENAME)
+}
+
+/// 共享真源侧的词表文件：`<agentsHome>/CONTEXT.md`（ADR-0007）。
+///
+/// **dsh 不读此文件**（全仓无引用，见 `CONTEXT_MD_FILENAME` 的说明），它是 agent/技能
+/// 侧的约定资源。启动器提供「用默认程序编辑」入口，但不把它当作 dsh 的配置输入。
+pub fn agents_home_context_md() -> PathBuf {
+    agents_home().join(CONTEXT_MD_FILENAME)
 }
 
 /// `<dshHome>/profiles`。

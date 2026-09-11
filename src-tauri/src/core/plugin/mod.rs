@@ -542,13 +542,23 @@ fn anchor_spec(spec: &str) -> String {
     }
 }
 
-/// 备份清单：受变更影响的 profile 文件。
-fn backup_targets(profile_dir: &std::path::Path) -> Vec<PathBuf> {
+/// 备份清单：受变更影响的 profile 文件
+///（`(绝对路径, 备份子路径)` —— 子路径参与文件名，见 `profile::backup_files`）。
+fn backup_targets(profile_dir: &std::path::Path) -> Vec<(PathBuf, PathBuf)> {
     vec![
-        profile_dir.join("package.json"),
-        profile_dir.join("pnpm-lock.yaml"),
-        profile_dir.join("pnpm-workspace.yaml"),
-        profile_dir.join("cordis.patch.yml"),
+        (profile_dir.join("package.json"), PathBuf::from("package.json")),
+        (
+            profile_dir.join("pnpm-lock.yaml"),
+            PathBuf::from("pnpm-lock.yaml"),
+        ),
+        (
+            profile_dir.join("pnpm-workspace.yaml"),
+            PathBuf::from("pnpm-workspace.yaml"),
+        ),
+        (
+            profile_dir.join("cordis.patch.yml"),
+            PathBuf::from("cordis.patch.yml"),
+        ),
     ]
 }
 
@@ -560,6 +570,38 @@ fn backup_dir(package: &str) -> PathBuf {
         .join("backups")
         .join("plugins");
     base.join(package).join(profile::timestamp())
+}
+
+/// **唯一**的失败回滚写入点（ADR-0006 D18）。
+///
+/// 为什么必须有这个例外：官方没有"回退到任意历史 lock 状态"的能力 ——
+/// `dsh plugin` / pnpm 只能前进（安装/更新），无法把 `package.json` +
+/// `pnpm-lock.yaml` + `pnpm-workspace.yaml` 还原到某个历史一致状态。
+/// 因此当官方通道执行**失败**时，启动器用备份还原这三个文件（含
+/// `cordis.patch.yml`），**并立刻跟一次官方通道 `dsh plugin … install` 收敛**，
+/// 让 node_modules 与还原后的 manifest 重新对齐。
+///
+/// ADR-0006 D18 把这条路径登记为启动器白名单的**唯一例外**：除本函数外，
+/// `src-tauri/src/**` 中不存在任何写这三个 profile 文件的调用点。
+/// 该不变量由 `tests/part_b_compliance_test.rs` 的静态断言守护（ADR-0009 D19 订正：
+/// 此前此处引用的是并不存在的 `tests/plugin_whitelist_test.rs`）。
+fn rollback_after_failed_official_op(
+    profile_name: &str,
+    backup: &std::path::Path,
+    targets: &[(PathBuf, PathBuf)],
+    logger: &Arc<Logger>,
+) {
+    match profile::restore_files(backup, targets) {
+        Ok(restored) => logger.warn(&format!(
+            "已从备份还原 {} 个 profile 文件（官方无回退能力，D18 唯一例外）",
+            restored.len()
+        )),
+        Err(error) => logger.error(&format!("从备份还原 profile 文件失败: {error}")),
+    }
+    // 紧随官方通道收敛（D18 强制）：让 node_modules 与还原后的 manifest 一致
+    if let Err(error) = run_plugin_forward(profile_name, &["install".to_string()], logger) {
+        logger.warn(&format!("回滚后的官方通道收敛失败（请手动执行 dsh plugin install）: {error}"));
+    }
 }
 
 /// 停止 dsh（返回是否曾运行）。
@@ -689,9 +731,7 @@ pub fn install(
     let args = vec!["add".to_string(), spec_value.clone()];
     if let Err(error) = run_plugin_forward(profile_name, &args, logger) {
         logger.error(&format!("插件安装失败，开始回滚：{error}"));
-        let _ = profile::restore_files(&backup, &targets);
-        // 让 node_modules 与还原后的 manifest 收敛
-        let _ = run_plugin_forward(profile_name, &["install".to_string()], logger);
+        rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
         restart_if_needed(process, logger, was_running);
         return Err(PluginError::verification(format!(
             "插件安装失败（已回滚）: {error}"
@@ -721,8 +761,7 @@ pub fn install(
         let _ = run_plugin_forward(profile_name, &["install".to_string()], logger);
         let after = profile::read_manifest(&dir)?;
         if !after.bundles.iter().any(|item| item == &package) {
-            let _ = profile::restore_files(&backup, &targets);
-            let _ = run_plugin_forward(profile_name, &["install".to_string()], logger);
+            rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
             restart_if_needed(process, logger, was_running);
             return Err(PluginError::verification(format!(
                 "{package} 未被 dsh 对账进 dsh.profile.bundles（已回滚）"
@@ -834,8 +873,7 @@ pub fn uninstall(
     let args = vec!["remove".to_string(), package.to_string()];
     if let Err(error) = run_plugin_forward(profile_name, &args, logger) {
         logger.error(&format!("插件卸载失败，开始回滚：{error}"));
-        let _ = profile::restore_files(&backup, &targets);
-        let _ = run_plugin_forward(profile_name, &["install".to_string()], logger);
+        rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
         restart_if_needed(process, logger, was_running);
         return Err(PluginError::verification(format!(
             "插件卸载失败（已回滚）: {error}"
@@ -847,8 +885,7 @@ pub fn uninstall(
     if after.dependencies.contains_key(package)
         || after.bundles.iter().any(|item| item == package)
     {
-        let _ = profile::restore_files(&backup, &targets);
-        let _ = run_plugin_forward(profile_name, &["install".to_string()], logger);
+        rollback_after_failed_official_op(profile_name, &backup, &targets, logger);
         restart_if_needed(process, logger, was_running);
         return Err(PluginError::verification(format!(
             "{package} 仍留在 profile 依赖或 bundles 中（已回滚）"

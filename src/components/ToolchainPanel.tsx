@@ -6,6 +6,7 @@
 // - 顶部工具条：批量一键安装缺失 / 一键卸载全部（带确认对话框）
 // - 支持 python 安装（Rust 端官方安装包静默安装）
 import { useCallback, useEffect, useState } from "react";
+import { useTauriEvent, useRefreshOnEvent } from "@/hooks/useTauriEvent";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardDescription, CardTitle } from "@/components/ui/card";
@@ -78,42 +79,22 @@ export default function ToolchainPanel() {
   }, [refresh]);
 
   // 订阅工具链变更事件（Rust 在 install_toolchain 成功后广播 → 自动刷新条目状态）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listenToolchainChanged(() => {
-          refresh();
-        });
-      } catch (e) {
-        console.error("订阅工具链变更事件失败", e);
-      }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [refresh]);
+  // 统一走 useTauriEvent（ADR-0009 D7）
+  useRefreshOnEvent(listenToolchainChanged, () => refresh(), [refresh]);
 
   // 订阅安装进度事件（仅处理 channel=toolchain，避免污染其他面板的进度显示）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    (async () => {
-      try {
-        unlisten = await listenProgress((p) => {
-          if (p.channel === "toolchain") {
-            setProgress(p);
-            // 安装完成阶段自动结束 busy 态
-            if (p.phase === "done") setBusyName(null);
-          }
-        });
-      } catch (e) {
-        console.error("订阅安装进度事件失败", e);
+  // 统一走 useTauriEvent（ADR-0009 D7）
+  useTauriEvent(
+    listenProgress,
+    (p) => {
+      if (p.channel === "toolchain") {
+        setProgress(p);
+        // 安装完成阶段自动结束 busy 态
+        if (p.phase === "done") setBusyName(null);
       }
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
+    },
+    [],
+  );
 
   // 汇总批量结果 toast（成功/失败分开提示）
   function showBatchResults(results: BatchResult[], action: string) {
@@ -127,14 +108,18 @@ export default function ToolchainPanel() {
     });
   }
 
-  // UAC 提示语义细分（v0.4.1 修复）：
-  // - install_git：Start-Process 无 -Wait → 真正异步（UAC 确认后后台安装，未完成即返回）→ 需提示
-  // - 其余（node/pnpm 安装、python 安装/卸载、git 卸载、node 卸载）：Rust 端均为 -Wait 同步，
-  //   返回时操作已完成 → 直接成功提示，不再显示“等待 UAC 后手动刷新”
-  function handleSyncDone(name: string, msg: string) {
+  // UAC 提示语义细分（ADR-0009 D9）：
+  // - **仅 git 安装**为真异步：`install_git` 用 `Start-Process`（**无 -Wait**）→ UAC 确认后
+  //   后台安装，命令立即返回，故需提示「完成后手动重新检测」。
+  // - 其余全部为 `-Wait` **同步**：node/pnpm 安装、python 安装、以及 **git 卸载**
+  //   （`core/toolchain.rs::uninstall_git` 为 `Start-Process ... -Wait`）→ 返回即已完成。
+  //
+  // 此前判据只看 `name === "git"`，导致 **git 卸载完成后仍提示「请在 UAC 弹窗中确认后
+  // 重新检测」**（自相矛盾的误导）。现按**操作类型**区分。
+  function handleSyncDone(operation: "install" | "uninstall", name: string, msg: string) {
     setBusyName(null);
-    if (name === "git") {
-      // 仅 git 安装为异步（由 install_toolchain 广播排除 git 佐证）
+    const asyncUac = operation === "install" && name === "git";
+    if (asyncUac) {
       setUacPending(true);
       toast.success(msg, { description: UAC_HINT });
     } else {
@@ -149,7 +134,7 @@ export default function ToolchainPanel() {
     setProgress({ channel: "toolchain", phase: "prepare", percent: 0, message: "准备中…" });
     try {
       const msg = await installToolchain(name);
-      handleSyncDone(name, msg);
+      handleSyncDone("install", name, msg);
       // 同步安装完成（node/pnpm/python）→ 变更事件触发 refresh；这里兜底一次
       refresh();
     } catch (e) {
@@ -162,13 +147,13 @@ export default function ToolchainPanel() {
     }
   }
 
-  // 单项卸载（Node/Git/Python 均为 Rust 端 -Wait 同步完成）
+  // 单项卸载（Node/Git/Python 均为 Rust 端 -Wait 同步完成 → 不再误标 UAC 待确认）
   async function handleUninstall(name: string) {
     setBusyName(name);
     setUacPending(false);
     try {
       const msg = await uninstallToolchain(name);
-      handleSyncDone(name, msg);
+      handleSyncDone("uninstall", name, msg);
       refresh();
     } catch (e) {
       toast.error(`卸载失败: ${e}`);
@@ -218,16 +203,22 @@ export default function ToolchainPanel() {
 
   return (
     <div className="flex flex-col">
-      {/* 标题块 */}
+      {/* 标题块：窄宽度下批量操作按钮组换行到标题下方 */}
       <div className="flex flex-col gap-1">
-        <CardTitle className="flex items-center gap-2">
+        <CardTitle className="flex flex-wrap items-center gap-2">
           <Wrench className="size-4" />
           工具链
-          <Button variant="ghost" size="icon-sm" onClick={refresh} title="重新检测">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={refresh}
+            title="重新检测"
+            aria-label="重新检测工具链"
+          >
             <RefreshCw />
           </Button>
           {/* 批量操作 */}
-          <div className="ml-auto flex gap-1.5">
+          <div className="ml-auto flex flex-wrap gap-1.5">
             <Button
               variant="outline"
               size="xs"
@@ -254,7 +245,7 @@ export default function ToolchainPanel() {
       <div className="space-y-2">
         {/* 安装进度条（channel=toolchain 时显示） */}
         {progress && (
-          <div className="rounded-md border bg-muted/30 p-2">
+          <div className="rounded-md border border-border/60 bg-muted/30 p-2">
             <div className="mb-1 flex items-center justify-between text-xs">
               <span className="font-medium">{PHASE_LABELS[progress.phase] ?? progress.phase}</span>
               <span className="tabular-nums text-muted-foreground">{progress.percent}%</span>
@@ -272,8 +263,9 @@ export default function ToolchainPanel() {
         {items.map((item, i) => (
           <div key={item.name}>
             {i > 0 && <Separator className="mb-2" />}
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className="flex items-center gap-1.5 font-medium">
+            {/* 行：窄宽度下版本信息与操作按钮自动换行，不挤压 */}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 py-0.5">
+              <span className="flex min-w-0 items-center gap-1.5 font-medium">
                 <span className="truncate">{ITEM_LABEL[item.name] ?? item.name}</span>
                 <Badge variant={STATE_META[item.state]?.variant ?? "outline"}>
                   {STATE_META[item.state]?.label ?? item.state}
@@ -326,7 +318,7 @@ export default function ToolchainPanel() {
 
       {/* 一键卸载全部确认对话框 */}
       <Dialog open={confirmUninstall} onOpenChange={setConfirmUninstall}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="w-[calc(100vw-2rem)] max-w-md">
           <DialogHeader>
             <DialogTitle>一键卸载全部工具链？</DialogTitle>
             <DialogDescription>

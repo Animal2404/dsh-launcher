@@ -35,6 +35,14 @@ pub struct AppConfig {
     pub auto_open_browser: bool,
     /// 启动后自动同步 upstream 插件（自研插件永不受影响，见 ADR-0005 D6）
     pub auto_sync_plugins: bool,
+    /// 外部编辑器命令（ADR-0008）：空 = 用系统默认关联程序打开。
+    ///
+    /// 自由文本而非枚举 —— 编辑器无法穷举（VS Code / Cursor / Zed / Sublime /
+    /// Notepad++ …）。只取第一段作为可执行文件，其余作为参数（支持
+    /// `code --wait` 这类带参数的命令行）。
+    pub editor_command: String,
+    /// 是否已经问过「用哪个程序打开」：首次点击编辑时弹一次引导，选完置 true。
+    pub editor_prompt_seen: bool,
 }
 
 impl Default for AppConfig {
@@ -53,6 +61,8 @@ impl Default for AppConfig {
             auto_start_dsh: false,
             auto_open_browser: true,
             auto_sync_plugins: true,
+            editor_command: String::new(),
+            editor_prompt_seen: false,
         }
     }
 }

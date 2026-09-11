@@ -1,3 +1,9 @@
+// 弹窗尺寸策略（v0.7.1 修复）：
+// 原实现基线类含 `sm:max-w-sm`，与调用方传入的 max-w-* 特异性相同，
+// 而 Tailwind v4 把 `sm:` 媒体查询变体输出在基础工具类之后 → 调用方宽度被恒定覆盖，
+// 四个管理面板在 ≥640px 视口下全部退化为 384px（详见 CHANGELOG v0.7.1）。
+// 现改为：宽度完全交还调用方（DialogContent 不再声明任何 max-width），
+// 仅保留一个不冲突的视口安全宽度；结构上拆为「可滚动主体 + sticky 头部」。
 import * as React from "react"
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 
@@ -29,7 +35,10 @@ function DialogOverlay({
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        // 遮罩：更深一档的压暗 + 模糊，配合统一的 200ms 缓动（见 index.css --motion-*）
+        // z-[300]：必须高于全部应用外壳层级（侧栏 210 / 拖拽 handle 220 /
+        // 右栏遮罩 245~270），否则窗口较窄时弹窗会被侧栏盖住（v0.7.1 修复）
+        "fixed inset-0 isolate z-[300] bg-black/45 duration-200 supports-backdrop-filter:backdrop-blur-[3px] data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -51,7 +60,11 @@ function DialogContent({
       <DialogPrimitive.Popup
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          // 布局：固定居中 + 网格；宽度不在此声明（交还调用方，避免级联覆盖）
+          // overflow-y-auto：主体已独立滚动时它不会产生滚动条；无 DialogBody 的
+          // 确认类弹窗（内容较高）则由它兜底滚动，避免内容被裁掉
+          // z-[310]：高于遮罩（300）与应用外壳全部层级，保证弹窗始终在最上层
+          "dialog-content fixed top-1/2 left-1/2 z-[310] grid -translate-x-1/2 -translate-y-1/2 gap-0 overflow-x-hidden overflow-y-auto rounded-xl bg-popover p-0 text-sm text-popover-foreground shadow-2xl ring-1 ring-foreground/10 duration-200 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
         {...props}
@@ -60,17 +73,19 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"
+            aria-label="关闭对话框"
             render={
               <Button
                 variant="ghost"
-                className="absolute top-2 right-2"
+                className="absolute top-2.5 right-2.5 z-10"
                 size="icon-sm"
+                aria-label="关闭对话框"
               />
             }
           >
             <XIcon
             />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">关闭</span>
           </DialogPrimitive.Close>
         )}
       </DialogPrimitive.Popup>
@@ -82,7 +97,25 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2", className)}
+      className={cn(
+        // sticky 头部：长内容滚动时标题常驻，右侧预留关闭按钮位
+        "sticky top-0 z-[5] flex flex-col gap-2 border-b border-border/60 bg-popover/95 px-4 py-3 pr-10 backdrop-blur-sm supports-backdrop-filter:bg-popover/80",
+        className
+      )}
+      {...props}
+    />
+  )
+}
+
+function DialogBody({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-body"
+      className={cn(
+        // 主体：自适应高度并独立滚动（长列表不把弹窗撑出视口）
+        "min-h-0 overflow-y-auto overscroll-contain px-4 py-4",
+        className
+      )}
       {...props}
     />
   )
@@ -100,7 +133,8 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
+        // 底部操作区：窄宽度自动换行堆叠，宽宽度右对齐
+        "flex flex-col-reverse gap-2 border-t border-border/60 bg-muted/40 px-4 py-3 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
@@ -108,7 +142,7 @@ function DialogFooter({
       {children}
       {showCloseButton && (
         <DialogPrimitive.Close render={<Button variant="outline" />}>
-          Close
+          关闭
         </DialogPrimitive.Close>
       )}
     </div>
@@ -146,6 +180,7 @@ function DialogDescription({
 
 export {
   Dialog,
+  DialogBody,
   DialogClose,
   DialogContent,
   DialogDescription,
